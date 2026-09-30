@@ -43,20 +43,27 @@ class MessageEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class HandoffEvent:
-    """Le superviseur vient de passer la main."""
+class ToolCallEvent:
+    """L'agent vient d'appeler un outil.
 
-    to: str
-    kind: Literal["handoff"] = "handoff"
+    Le nom seul, pas les arguments : c'est de quoi afficher « Lecture de
+    l'agenda… » pendant l'attente. Le détail d'un geste engageant arrive par
+    `approval_request`, sous la forme calculée par le serveur.
+    """
+
+    name: str
+    kind: Literal["tool_call"] = "tool_call"
 
 
 @dataclass(frozen=True, slots=True)
 class ApprovalEvent:
     """Le graphe est suspendu : une écriture attend une relecture humaine.
 
-    `payload` est l'aperçu rendu par `mass-mcp`, non retouché. L'interface
-    l'affiche tel quel — c'est ce qui garantit que ce qui est approuvé est bien
-    ce qui a été calculé.
+    `payload` est la demande de validation (`ApprovalRequest`) : un titre, la
+    conséquence du geste, et l'aperçu rendu par `mass-mcp`, non retouché.
+    `GET /threads/:id/state` rend exactement la même forme dans
+    `pendingApproval`, pour qu'une interface rouverte après coup n'ait pas deux
+    lectures à maintenir.
     """
 
     payload: dict[str, Any]
@@ -94,9 +101,8 @@ class ThreadState:
     messages: list[dict[str, Any]] = field(default_factory=list)
     status: RunStatus = "completed"
     pending_approval: dict[str, Any] | None = None
-    turns: int = 0
 
 
 GraphEvent = (
-    TokenEvent | MessageEvent | HandoffEvent | ApprovalEvent | ErrorEvent | DoneEvent
+    TokenEvent | MessageEvent | ToolCallEvent | ApprovalEvent | ErrorEvent | DoneEvent
 )

@@ -55,11 +55,11 @@ async def list_threads(
 async def thread_state(
     thread_id: str, caller: CurrentCaller, orchestrator: OrchestratorDep
 ) -> ApiResponse:
-    """L'état du fil : ses messages, et l'aperçu en attente s'il y en a un.
+    """L'état du fil : ses messages, et la validation en attente s'il y en a une.
 
     C'est cette route qui permet de rouvrir une conversation suspendue et de
     retrouver la validation qui l'attendait — y compris après un redémarrage du
-    service.
+    service. `pendingApproval` a la forme de l'évènement `approval_request`.
     """
     state = await orchestrator.get_state(thread_id, caller.admin)
     return ApiResponse.success(
@@ -68,7 +68,6 @@ async def thread_state(
             "status": state.status,
             "messages": state.messages,
             "pendingApproval": state.pending_approval,
-            "turns": state.turns,
         }
     )
 

@@ -18,24 +18,26 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langgraph.errors import GraphRecursionError
 from langgraph.pregel import Pregel
 from langgraph.types import Command
 
 from mass_agents.auth import AdminIdentity
 from mass_agents.config import LimitsConfig, McpConfig
-from mass_agents.domain import ApprovalDecision, MassAgentsError, PendingAction
+from mass_agents.domain import ApprovalDecision, MassAgentsError
 from mass_agents.graph.context import RunContext, build_run_config, build_thread_config
 from mass_agents.graph.events import (
     ApprovalEvent,
     DoneEvent,
     ErrorEvent,
     GraphEvent,
-    HandoffEvent,
     MessageEvent,
     RunStatus,
     ThreadState,
     TokenEvent,
+    ToolCallEvent,
 )
+from mass_agents.graph.limits import steps_exhausted_message
 from mass_agents.persistence import ApprovalLog, Thread, ThreadRepository
 from mass_agents.tools import build_mass_toolset
 
@@ -44,6 +46,11 @@ logger = logging.getLogger(__name__)
 #: Longueur du titre déduit du premier message. Assez pour reconnaître un fil
 #: dans une liste, trop court pour qu'on croie y lire la demande entière.
 _TITLE_LENGTH = 80
+
+#: Supersteps par appel de modèle, au plus : `agent`, `outils`, `apercu`,
+#: `validation`. Multiplié par le plafond d'étapes, cela donne une limite de
+#: récursion qui ne se déclenche que si ce plafond était contourné.
+_SUPERSTEPS_PER_STEP = 4
 
 
 class Orchestrator:
@@ -92,21 +99,29 @@ class Orchestrator:
         Le contrôle passe par le dépôt et non par le checkpointer : ce dernier
         ne connaît que des identifiants opaques et servirait n'importe quel fil
         à n'importe qui.
+
+        La validation en attente est lue dans l'interruption elle-même, et non
+        reconstruite : c'est la même charge utile que l'évènement
+        `approval_request` du flux.
         """
         await self._threads.get_owned(thread_id, admin.user_id)
 
         snapshot = await self._graph.aget_state(build_thread_config(thread_id))
         values: dict[str, Any] = snapshot.values or {}
-
-        pending: PendingAction | None = values.get("pending_action")
-        awaiting = bool(snapshot.interrupts)
+        pending = next(
+            (dict(i.value) for i in snapshot.interrupts if isinstance(i.value, dict)),
+            None,
+        )
 
         return ThreadState(
             thread_id=thread_id,
-            messages=[_serialize(message) for message in values.get("messages", [])],
-            status="awaiting_approval" if awaiting else "completed",
-            pending_approval=pending.preview if awaiting and pending else None,
-            turns=values.get("turns", 0),
+            messages=[
+                _serialize(message)
+                for message in values.get("messages", [])
+                if _is_visible(message)
+            ],
+            status="awaiting_approval" if pending else "completed",
+            pending_approval=pending,
         )
 
     # -- runs ---------------------------------------------------------------
@@ -166,6 +181,7 @@ class Orchestrator:
         config = build_run_config(
             thread_id,
             RunContext(admin=admin, toolset=toolset, approvals=self._approvals),
+            recursion_limit=self._limits.max_steps * _SUPERSTEPS_PER_STEP,
         )
 
         status: RunStatus = "completed"
@@ -186,6 +202,14 @@ class Orchestrator:
                 ),
                 recoverable=True,
             )
+        except GraphRecursionError:
+            # Le plafond d'étapes du nœud `agent` aurait dû arrêter le run
+            # avant : y arriver signale un chemin qui le contourne.
+            logger.error("Limite de récursion atteinte : thread=%s", thread_id)
+            status = "stopped"
+            yield ErrorEvent(
+                message=steps_exhausted_message(self._limits), recoverable=True
+            )
         except Exception as error:
             logger.exception("Échec du run : thread=%s", thread_id)
             status = "failed"
@@ -196,23 +220,18 @@ class Orchestrator:
     async def _consume(self, payload: Any, config: Any) -> AsyncIterator[GraphEvent]:
         """Traduit le flux de LangGraph en évènements du service.
 
-        `subgraphs=True` est indispensable : les agents spécialistes tournent
-        dans des sous-graphes, et sans cela leurs jetons n'atteindraient jamais
-        le navigateur — seul le superviseur, qui ne produit presque pas de
-        texte, serait diffusé.
+        Deux modes : `messages` pour les fragments de texte au fil de l'eau,
+        `updates` pour ce que chaque nœud a produit une fois terminé — messages
+        complets, appels d'outils, interruption.
         """
-        async for namespace, mode, chunk in self._graph.astream(
-            payload,
-            config,
-            stream_mode=["updates", "messages"],
-            subgraphs=True,
+        async for mode, chunk in self._graph.astream(
+            payload, config, stream_mode=["updates", "messages"]
         ):
             if mode == "messages":
-                event = _token_event(chunk)
-                if event is not None:
+                if (event := _token_event(chunk)) is not None:
                     yield event
             elif mode == "updates":
-                for event in _update_events(chunk, namespace): # type: ignore
+                for event in _update_events(chunk):
                     yield event
 
 
@@ -234,7 +253,7 @@ def _token_event(chunk: Any) -> TokenEvent | None:
     if not isinstance(message, AIMessage):
         return None
 
-    text = _text_of(getattr(message, "content", None))
+    text = _text_of(message.content)
     if not text:
         return None
 
@@ -242,7 +261,7 @@ def _token_event(chunk: Any) -> TokenEvent | None:
     return TokenEvent(text=text, node=node)
 
 
-def _update_events(chunk: Any, namespace: tuple[str, ...]) -> list[GraphEvent]:
+def _update_events(chunk: Any) -> list[GraphEvent]:
     if not isinstance(chunk, dict):
         return []
 
@@ -255,26 +274,32 @@ def _update_events(chunk: Any, namespace: tuple[str, ...]) -> list[GraphEvent]:
             if isinstance(getattr(item, "value", None), dict)
         ]
 
-    # Les mises à jour des sous-graphes sont ignorées : leurs messages
-    # remontent déjà dans la mise à jour du nœud parent, et les diffuser deux
-    # fois afficherait chaque réponse en double.
-    if namespace:
-        return []
-
     events: list[GraphEvent] = []
     for node, update in chunk.items():
         if not isinstance(update, dict):
             continue
 
-        if (destination := update.get("next")) and destination != node:
-            events.append(HandoffEvent(to=destination))
-
+        # Seuls les messages de l'assistant ont un sens pour l'interface : les
+        # résultats d'outils sont de la matière pour le modèle, pas une réponse.
         for message in update.get("messages", []):
-            text = _text_of(getattr(message, "content", None))
-            if isinstance(message, AIMessage) and text:
+            if not isinstance(message, AIMessage):
+                continue
+            if text := _text_of(message.content):
                 events.append(MessageEvent(role="assistant", content=text, node=node))
+            events.extend(ToolCallEvent(name=c["name"]) for c in message.tool_calls)
 
     return events
+
+
+def _is_visible(message: AnyMessage) -> bool:
+    """Ce qu'une conversation rouverte montre : les demandes et les réponses.
+
+    Pas les résultats d'outils ni les appels sans texte — la même règle que le
+    flux, pour qu'un fil relu ressemble au fil vécu.
+    """
+    if isinstance(message, HumanMessage):
+        return True
+    return isinstance(message, AIMessage) and bool(_text_of(message.content))
 
 
 def _text_of(content: Any) -> str:
@@ -308,7 +333,6 @@ def _serialize(message: AnyMessage) -> dict[str, Any]:
         "id": message.id,
         "role": message.type,
         "content": _text_of(message.content),
-        "name": getattr(message, "name", None),
     }
 
 

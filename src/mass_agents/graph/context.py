@@ -66,20 +66,29 @@ class RunContext:
     approvals: ApprovalLog
 
 
-def build_run_config(thread_id: str, context: RunContext) -> RunnableConfig:
+def build_run_config(
+    thread_id: str, context: RunContext, *, recursion_limit: int | None = None
+) -> RunnableConfig:
     """La configuration d'un run : le fil, et le contexte de l'appelant.
 
     Le contexte est reconstruit **à chaque run**, jamais à la création du fil.
     C'est ce qui rend l'expiration du jeton supportable : une conversation
     ouverte hier reprend avec le jeton d'aujourd'hui, sans qu'aucun état n'ait
     à être migré.
+
+    `recursion_limit` est un filet, pas le plafond : c'est le nœud `agent` qui
+    arrête le run avec un message lisible. La limite de LangGraph ne doit se
+    déclencher que si ce plafond était contourné.
     """
-    return {
+    config: RunnableConfig = {
         "configurable": {
             "thread_id": thread_id,
             RUN_CONTEXT_KEY: context,
         }
     }
+    if recursion_limit is not None:
+        config["recursion_limit"] = recursion_limit
+    return config
 
 
 def build_thread_config(thread_id: str) -> RunnableConfig:

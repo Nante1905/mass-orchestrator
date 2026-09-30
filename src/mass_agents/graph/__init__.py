@@ -11,11 +11,11 @@ from mass_agents.graph.events import (
     DoneEvent,
     ErrorEvent,
     GraphEvent,
-    HandoffEvent,
     MessageEvent,
     RunStatus,
     ThreadState,
     TokenEvent,
+    ToolCallEvent,
 )
 from mass_agents.graph.runtime import Orchestrator
 from mass_agents.graph.state import OrchestratorState
@@ -25,7 +25,6 @@ __all__ = [
     "DoneEvent",
     "ErrorEvent",
     "GraphEvent",
-    "HandoffEvent",
     "MessageEvent",
     "Orchestrator",
     "OrchestratorState",
@@ -33,6 +32,7 @@ __all__ = [
     "RunStatus",
     "ThreadState",
     "TokenEvent",
+    "ToolCallEvent",
     "build_graph",
     "build_run_config",
     "build_thread_config",

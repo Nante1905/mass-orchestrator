@@ -41,8 +41,8 @@ from mass_agents.domain import (
 )
 from mass_agents.graph.context import run_context
 from mass_agents.graph.nodes.supervisor import SUPERVISOR
-from mass_agents.graph.pending import parse_tool_payload
 from mass_agents.graph.state import OrchestratorState
+from mass_agents.tools.payload import parse_tool_payload
 
 logger = logging.getLogger(__name__)
 

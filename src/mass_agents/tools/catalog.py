@@ -1,24 +1,25 @@
-"""La répartition des outils entre les agents.
+"""La classification des outils, par ce que leur appel engage.
 
-Le découpage est fait par **niveau d'engagement**, pas par domaine métier. Un
-agent qui ne détient pas `send_email` ne peut pas l'appeler, quelle que soit la
-formulation de la demande : c'est une garantie de construction, pas une
-consigne au modèle.
+Trois familles, et c'est elles — pas une répartition entre agents — qui décident
+du chemin dans le graphe :
 
-Le recouvrement des outils de lecture est voulu. `opérations` doit pouvoir
-résoudre « les présents de samedi » en identifiants `EMR…` avant de proposer
-quoi que ce soit — lui retirer `get_event_details` au nom d'une répartition
-propre l'obligerait à agir sur des clés qu'il n'a pas vérifiées.
+- **lecture** : rien n'est modifié, l'appel s'exécute directement ;
+- **brouillon** : écrit, mais tout reste invisible du public et se défait ;
+- **engageant** : sort de l'association et ne se défait pas. L'appel ne
+  s'exécute jamais depuis la boucle de l'agent : il passe par l'aperçu, puis
+  par la validation humaine.
 
 La liste est une donnée, lue par le constructeur de l'outillage. Un outil ajouté
-à `mass-mcp` n'atteint aucun agent tant qu'il n'a pas été rangé ici.
+à `mass-mcp` n'atteint pas l'agent tant qu'il n'a pas été rangé ici.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-ANALYST_TOOLS: Final[tuple[str, ...]] = (
+from mass_agents.domain import ENGAGING_TOOLS
+
+READ_TOOLS: Final[tuple[str, ...]] = (
     "list_events",
     "get_event_details",
     "list_members",
@@ -27,33 +28,88 @@ ANALYST_TOOLS: Final[tuple[str, ...]] = (
     "get_finance_summary",
     "query_analytics",
 )
-"""Lecture seule. Aucune écriture n'est atteignable depuis ce nœud."""
+"""Lecture seule."""
 
-EDITOR_TOOLS: Final[tuple[str, ...]] = (
+DRAFT_TOOLS: Final[tuple[str, ...]] = (
     "create_event_draft",
     "update_draft",
     "create_email_template",
+)
+"""Écrit, mais tout reste en brouillon.
+
+`mass-mcp` force `status: draft` à l'écriture et refuse de modifier ce qui n'est
+plus un brouillon : l'agent ne peut pas publier même s'il le voulait.
+"""
+
+#: Les outils engageants, dans un ordre fixe. Le `frozenset` du domaine n'en a
+#: pas, et l'ordre des outils fait partie du préfixe de chaque requête : un
+#: ordre qui varierait d'un processus à l'autre invaliderait le cache de prompt.
+ENGAGING_TOOL_ORDER: Final[tuple[str, ...]] = tuple(sorted(ENGAGING_TOOLS))
+
+#: Ce que l'agent détient, dans l'ordre où il le découvre : lire, préparer,
+#: engager — une écriture bien informée commence par une lecture.
+AGENT_TOOLS: Final[tuple[str, ...]] = READ_TOOLS + DRAFT_TOOLS + ENGAGING_TOOL_ORDER
+
+#: Tous les outils dont un run a besoin. Sert à l'appel unique au serveur MCP et
+#: au contrôle de complétude au démarrage du run.
+REQUIRED_TOOLS: Final[frozenset[str]] = frozenset(AGENT_TOOLS)
+
+#: Le paramètre par lequel `mass-mcp` distingue l'aperçu de l'écriture.
+#:
+#: Il n'est **jamais** montré au modèle. `mass-mcp` ne peut pas savoir qui le
+#: pose : un `confirmed: true` écrit par le modèle — par erreur ou sous
+#: l'influence d'un texte injecté dans les données lues — ferait partir le
+#: courriel sans relecture. Seul le nœud de validation le pose, après décision
+#: humaine.
+CONFIRMATION_PARAM: Final[str] = "confirmed"
+
+#: Les descriptions que le modèle lit pour les outils engageants.
+#:
+#: Elles remplacent celles de `mass-mcp`, écrites pour un client qui confirme
+#: lui-même (« rappeler avec `confirmed: true` »). Ici, l'agent ne confirme
+#: jamais : il propose, et le résultat de l'outil lui dit ce qu'un humain a
+#: décidé.
+ENGAGING_DESCRIPTIONS: Final[dict[str, str]] = {
+    "send_email": (
+        "Écrit à une adresse (`to`), ou à tous les comptes d'une liste de "
+        "diffusion (`group_id`) — l'un ou l'autre, jamais les deux.\n\n"
+        "L'appel ne fait pas partir le courriel : il le soumet à "
+        "l'administrateur, qui en relit l'aperçu — destinataires résolus, "
+        "objet, corps intégral — puis approuve ou refuse. Le résultat de "
+        "l'outil dit ce qui a été décidé et, en cas d'envoi, ce qui est "
+        "parti.\n\n"
+        "Un courriel envoyé ne se rappelle pas : il part de la boîte de "
+        "l'association et engage son nom. Le corps est interprété en HTML — "
+        "les retours à la ligne doivent être des balises. Pour partir d'un "
+        "modèle enregistré, le relire d'abord avec `query_analytics` sur "
+        "`email_template` et y substituer les {{variables}}."
+    ),
+    "mark_attendance": (
+        "Marque un ou plusieurs inscrits présents à un évènement, ou annule "
+        "leur pointage. Les identifiants attendus sont ceux des inscriptions "
+        "(`EMR…` pour un membre, `EPR…` pour un visiteur), rendus par "
+        "`get_event_details`.\n\n"
+        "L'appel n'écrit rien : il soumet le pointage à l'administrateur, qui "
+        "en relit la liste nominative puis approuve ou refuse. Le résultat de "
+        "l'outil dit ce qui a été décidé.\n\n"
+        "Chaque personne nouvellement pointée présente reçoit par courriel son "
+        "lien d'avis sur l'évènement : un pointage par erreur envoie un vrai "
+        "message."
+    ),
+}
+
+# -- Transitoire -------------------------------------------------------------
+# La répartition par agent, lue par `agents/specialists.py` jusqu'au passage à
+# l'agent unique (lot 2), qui la supprimera avec lui.
+
+ANALYST_TOOLS: Final[tuple[str, ...]] = READ_TOOLS
+EDITOR_TOOLS: Final[tuple[str, ...]] = (
+    *DRAFT_TOOLS,
     "list_events",
     "get_event_details",
 )
-"""Écrit, mais tout reste en brouillon et invisible du public.
-
-`mass-mcp` force `status: draft` à l'écriture et refuse de modifier ce qui n'est
-plus un brouillon : le rédacteur ne peut pas publier même s'il le voulait.
-"""
-
 OPERATIONS_TOOLS: Final[tuple[str, ...]] = (
-    "mark_attendance",
-    "send_email",
+    *ENGAGING_TOOL_ORDER,
     "get_event_details",
     "list_members",
-)
-"""Engage l'association — d'où le nœud de validation obligatoire en aval."""
-
-#: Tous les outils dont un run peut avoir besoin, sans doublon.
-#:
-#: Sert à l'appel unique au serveur MCP : les trois sous-ensembles se découpent
-#: ensuite en mémoire, sans aller-retour supplémentaire.
-REQUIRED_TOOLS: Final[frozenset[str]] = frozenset(
-    ANALYST_TOOLS + EDITOR_TOOLS + OPERATIONS_TOOLS
 )

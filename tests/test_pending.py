@@ -12,7 +12,7 @@ import json
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from mass_agents.graph.pending import detect_pending_action, parse_tool_payload
+from mass_agents.graph.pending import detect_pending_action
 
 APERCU_COURRIEL = {
     "sent": False,
@@ -112,16 +112,3 @@ def test_un_appel_sans_resultat_n_ouvre_rien():
     )
 
     assert detect_pending_action([HumanMessage(content="écris-leur"), appel]) is None
-
-
-def test_les_blocs_de_contenu_sont_lus_comme_du_texte():
-    """Anthropic rend une liste de blocs dès qu'il y a autre chose que du texte."""
-    blocs = [{"type": "text", "text": json.dumps(APERCU_COURRIEL)}]
-
-    assert parse_tool_payload(blocs) == APERCU_COURRIEL
-
-
-def test_un_contenu_illisible_n_est_pas_une_erreur():
-    assert parse_tool_payload("12 évènements trouvés") is None
-    assert parse_tool_payload("") is None
-    assert parse_tool_payload(None) is None

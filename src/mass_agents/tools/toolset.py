@@ -17,13 +17,20 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping
+from typing import Any
 
 from langchain_core.tools import BaseTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from mass_agents.config import McpConfig, get_config
-from mass_agents.domain import ToolsetError
-from mass_agents.tools.catalog import REQUIRED_TOOLS
+from mass_agents.domain import ENGAGING_TOOLS, ToolsetError
+from mass_agents.tools.catalog import (
+    AGENT_TOOLS,
+    CONFIRMATION_PARAM,
+    ENGAGING_DESCRIPTIONS,
+    REQUIRED_TOOLS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,28 +40,41 @@ _SERVER_NAME = "mass"
 class MassToolset:
     """Les outils d'un run, indexés par nom.
 
-    Le découpage par sous-ensemble se fait ici et pas dans les agents : c'est ce
-    qui permet de vérifier la répartition en lisant un seul fichier, et de la
-    tester sans monter de modèle.
+    Deux vues sur les mêmes outils : ce que le modèle voit (`agent_schemas`) et
+    ce que les nœuds exécutent (`get`). C'est l'écart entre les deux qui tient
+    `confirmed` hors de portée du modèle.
     """
 
     def __init__(self, tools: Iterable[BaseTool]) -> None:
         self._by_name: Mapping[str, BaseTool] = {tool.name: tool for tool in tools}
 
-    def subset(self, names: Iterable[str]) -> list[BaseTool]:
-        """Les outils demandés, dans l'ordre où ils sont déclarés.
+    def agent_schemas(self) -> list[BaseTool | dict[str, Any]]:
+        """Ce qu'on lie au modèle, dans l'ordre du catalogue.
 
-        L'ordre compte : c'est celui dans lequel le modèle les découvre, et les
-        lectures sont déclarées avant les écritures parce qu'une écriture bien
-        informée commence par une lecture.
+        Lectures et brouillons sont liés tels que `mass-mcp` les décrit. Les
+        outils engageants sont remplacés par une définition au format Anthropic
+        — même nom, description réécrite, schéma **sans `confirmed`** — que
+        `bind_tools` transmet sans la retoucher.
+
+        Retirer le paramètre du schéma ne suffit pas à lui seul : un modèle peut
+        produire un argument hors schéma. La garantie est posée à l'exécution,
+        par le nœud d'aperçu qui force `confirmed` à faux. Le retrait sert à ne
+        pas mettre sous les yeux du modèle un levier qu'il n'a pas à toucher.
         """
+        return [
+            _engaging_schema(tool) if tool.name in ENGAGING_TOOLS else tool
+            for tool in map(self.get, AGENT_TOOLS)
+        ]
+
+    def subset(self, names: Iterable[str]) -> list[BaseTool]:
+        """Transitoire : la répartition par agent, supprimée au lot 2."""
         return [self._by_name[name] for name in names]
 
     def get(self, name: str) -> BaseTool:
-        """Un outil par son nom, pour un appel hors de la boucle d'un agent.
+        """L'outil MCP tel qu'il est, pour les nœuds qui l'exécutent.
 
-        C'est ce dont le nœud de validation a besoin : il rejoue **le même**
-        outil avec `confirmed: true`, sans repasser par un modèle.
+        C'est lui, et non la définition liée au modèle, que l'aperçu et la
+        validation appellent : `confirmed` y existe, et c'est eux qui le posent.
         """
         try:
             return self._by_name[name]
@@ -101,6 +121,34 @@ async def build_mass_toolset(
     toolset = MassToolset(tools)
     _assert_complete(toolset, {tool.name for tool in tools})
     return toolset
+
+
+def _engaging_schema(tool: BaseTool) -> dict[str, Any]:
+    """La définition d'un outil engageant, telle que le modèle la voit.
+
+    Seuls le nom et le schéma viennent de `mass-mcp` ; le schéma perd
+    `confirmed`. La description est la nôtre (voir `ENGAGING_DESCRIPTIONS`).
+    """
+    parameters = convert_to_openai_tool(tool)["function"]["parameters"]
+
+    return {
+        "name": tool.name,
+        "description": ENGAGING_DESCRIPTIONS[tool.name],
+        "input_schema": {
+            **parameters,
+            "properties": {
+                key: value
+                for key, value in parameters.get("properties", {}).items()
+                if key != CONFIRMATION_PARAM
+            },
+            "required": [
+                key
+                for key in parameters.get("required", [])
+                if key != CONFIRMATION_PARAM
+            ],
+            "additionalProperties": False,
+        },
+    }
 
 
 def _assert_complete(toolset: MassToolset, exposed: set[str]) -> None:

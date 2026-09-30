@@ -1,0 +1,249 @@
+{
+  "info": {
+    "name": "mass-agents",
+    "description": "Orchestrateur conversationnel MASS.\n\nOrdre d'usage : « 1. Connexion » d'abord — elle enregistre le jeton dans la variable `adminJwt`, dont toutes les autres requêtes héritent. Puis « 3. Ouvrir un fil », qui enregistre `threadId`.\n\nLes deux requêtes de run rendent un flux `text/event-stream`. Postman récent l'affiche au fil de l'eau ; si votre version le met en tampon, utilisez `curl -N` (voir le README).\n\nLa validation humaine se joue en deux temps : « 5. Poser une action engageante » s'arrête sur un évènement `approval_request`, et c'est « 7a » ou « 7b » qui tranche.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{adminJwt}}", "type": "string" }]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:4100",
+      "description": "L'orchestrateur."
+    },
+    {
+      "key": "backendUrl",
+      "value": "http://localhost:3000/api/v1",
+      "description": "mass-backend, uniquement pour obtenir un jeton."
+    },
+    {
+      "key": "email",
+      "value": "",
+      "description": "Compte administrateur du back-office."
+    },
+    { "key": "password", "value": "" },
+    {
+      "key": "adminJwt",
+      "value": "",
+      "description": "Renseignée automatiquement par « 1. Connexion »."
+    },
+    {
+      "key": "threadId",
+      "value": "",
+      "description": "Renseignée automatiquement par « 3. Ouvrir un fil »."
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Connexion (mass-backend)",
+      "description": "L'orchestrateur n'émet aucun jeton : il vérifie ceux du back-office. C'est donc `mass-backend` qu'on interroge ici, et une seule fois — le jeton vaut un jour.",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.test('connexion réussie', () => pm.expect(body.ok).to.be.true);",
+              "pm.collectionVariables.set('adminJwt', body.payload.accessToken);",
+              "console.log('Jeton enregistré pour', body.payload.user.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{backendUrl}}/auth/login", "host": ["{{backendUrl}}"], "path": ["auth", "login"] },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}"
+        }
+      }
+    },
+    {
+      "name": "2. Santé",
+      "description": "Publique. Rappelle l'adresse du serveur MCP et le schéma des checkpoints — les deux choses qu'on veut lire en premier quand l'agent ne répond plus.",
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
+      }
+    },
+    {
+      "name": "3. Ouvrir un fil",
+      "description": "Aucun jeton n'est mémorisé ici : le fil ne retient que son propriétaire. Le titre est optionnel — sans lui, il sera déduit du premier message.",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.test('fil ouvert', () => pm.expect(body.ok).to.be.true);",
+              "pm.collectionVariables.set('threadId', body.payload.id);",
+              "console.log('threadId =', body.payload.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": { "raw": "{{baseUrl}}/threads", "host": ["{{baseUrl}}"], "path": ["threads"] },
+        "body": { "mode": "raw", "raw": "{\n  \"title\": null\n}" }
+      }
+    },
+    {
+      "name": "4. Lister mes fils",
+      "description": "Les fils de l'appelant, du plus récent au plus ancien. Ceux des autres administrateurs n'y figurent pas — la propriété est dans la clause `where`, pas dans un contrôle après lecture.",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/threads?limit=20&offset=0",
+          "host": ["{{baseUrl}}"],
+          "path": ["threads"],
+          "query": [
+            { "key": "limit", "value": "20" },
+            { "key": "offset", "value": "0" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "5a. Run — question de lecture (analyste)",
+      "description": "Route vers l'analyste, qui est en lecture seule. Flux SSE : `token` (fragments), `message` (message complet), `handoff` (changement d'agent), `done` (fin).\n\nAucune validation n'est demandée : rien n'est modifié.",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/threads/{{threadId}}/runs/stream",
+          "host": ["{{baseUrl}}"],
+          "path": ["threads", "{{threadId}}", "runs", "stream"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"Combien de personnes étaient présentes aux évènements de cette année ?\"\n}"
+        }
+      }
+    },
+    {
+      "name": "5b. Run — préparation (rédacteur)",
+      "description": "Route vers le rédacteur. Tout ce qu'il écrit reste en brouillon et invisible du public : `mass-mcp` force le statut à l'écriture. Aucune validation non plus — un brouillon se défait.",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/threads/{{threadId}}/runs/stream",
+          "host": ["{{baseUrl}}"],
+          "path": ["threads", "{{threadId}}", "runs", "stream"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"Prépare un brouillon d'évènement d'observation pour samedi prochain à 20h.\"\n}"
+        }
+      }
+    },
+    {
+      "name": "6. Run — action engageante (validation)",
+      "description": "Route vers les opérations. Le run s'arrête sur un évènement `approval_request` dont la charge utile est l'aperçu rendu par `mass-mcp` : destinataires résolus, objet, corps intégral, nombre de courriels.\n\nRien n'est parti à ce stade. L'état est checkpointé — vous pouvez redémarrer le service, la validation sera toujours là. Répondez avec « 7a » ou « 7b ».\n\nAdaptez le message à un groupe qui existe chez vous.",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/threads/{{threadId}}/runs/stream",
+          "host": ["{{baseUrl}}"],
+          "path": ["threads", "{{threadId}}", "runs", "stream"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"Écris à la commission observation pour annoncer la sortie de samedi à 20h.\"\n}"
+        }
+      }
+    },
+    {
+      "name": "7. État du fil",
+      "description": "Ses messages, et l'aperçu en attente s'il y en a un. `status` vaut `awaiting_approval` tant que la validation n'a pas été tranchée.\n\nC'est la route qui permet de rouvrir une conversation suspendue et d'y retrouver la validation — y compris après un redémarrage du service.",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/threads/{{threadId}}/state",
+          "host": ["{{baseUrl}}"],
+          "path": ["threads", "{{threadId}}", "state"]
+        }
+      }
+    },
+    {
+      "name": "7a. Approuver — l'envoi a lieu",
+      "description": "⚠️ Envoie de vrais courriels. Le nœud rejoue le même outil avec `confirmed: true` — les mêmes arguments, augmentés du seul drapeau. La décision est tracée dans `agents.approval_log` avec l'aperçu qui a été relu.",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/threads/{{threadId}}/runs/resume",
+          "host": ["{{baseUrl}}"],
+          "path": ["threads", "{{threadId}}", "runs", "resume"]
+        },
+        "body": { "mode": "raw", "raw": "{\n  \"approved\": true\n}" }
+      }
+    },
+    {
+      "name": "7b. Refuser — rien n'est envoyé",
+      "description": "Aucun appel d'outil. Le refus est enregistré au même titre qu'une approbation : c'est ce qui distingue « refusé » de « jamais demandé ».",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Accept", "value": "text/event-stream" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/threads/{{threadId}}/runs/resume",
+          "host": ["{{baseUrl}}"],
+          "path": ["threads", "{{threadId}}", "runs", "resume"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"approved\": false,\n  \"reason\": \"mauvais destinataires\"\n}"
+        }
+      }
+    },
+    {
+      "name": "8. Sans jeton — 401 attendu",
+      "description": "Vérifie la frontière. Doit rendre 401 avec `WWW-Authenticate: Bearer realm=\"mass-agents\"` et l'enveloppe `ApiResponse` que le back-office sait lire.",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('401', () => pm.response.to.have.status(401));",
+              "pm.test('en-tête présent', () => pm.expect(pm.response.headers.get('WWW-Authenticate')).to.include('mass-agents'));",
+              "pm.test('enveloppe ApiResponse', () => pm.expect(pm.response.json().ok).to.be.false);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "GET",
+        "url": { "raw": "{{baseUrl}}/threads", "host": ["{{baseUrl}}"], "path": ["threads"] }
+      }
+    }
+  ]
+}

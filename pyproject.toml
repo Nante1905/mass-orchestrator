@@ -1,0 +1,40 @@
+[project]
+name = "mass-agents"
+version = "0.1.0"
+description = "Orchestrateur LangGraph de la plateforme MASS : trois agents spécialisés au-dessus du serveur MCP, derrière une façade HTTP qui porte seule l'authentification."
+requires-python = ">=3.12"
+
+dependencies = [
+    "langgraph>=1.2",
+    "langgraph-checkpoint-postgres>=3.1",
+    "langchain-anthropic>=1.7",
+    "langchain-mcp-adapters>=0.3",
+    "fastapi>=0.141",
+    "uvicorn[standard]>=0.52",
+    "pydantic-settings>=2.15",
+    "pyjwt>=2.13",
+    "psycopg[binary,pool]>=3.3",
+    "sse-starlette>=3.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.14"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

@@ -66,10 +66,6 @@ class MassToolset:
             for tool in map(self.get, AGENT_TOOLS)
         ]
 
-    def subset(self, names: Iterable[str]) -> list[BaseTool]:
-        """Transitoire : la répartition par agent, supprimée au lot 2."""
-        return [self._by_name[name] for name in names]
-
     def get(self, name: str) -> BaseTool:
         """L'outil MCP tel qu'il est, pour les nœuds qui l'exécutent.
 

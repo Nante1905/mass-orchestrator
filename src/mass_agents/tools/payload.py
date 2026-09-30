@@ -16,6 +16,28 @@ import json
 from typing import Any
 
 
+def tool_text(raw: Any) -> str:
+    """Le texte d'un résultat d'outil, qu'il soit plat, en blocs ou déjà lu.
+
+    C'est ce qu'on rend au modèle dans un `ToolMessage` quand le résultat ne
+    vient pas de la boucle d'exécution ordinaire — l'aperçu, l'appel confirmé.
+    """
+    if isinstance(raw, str):
+        return raw
+
+    if isinstance(raw, list):
+        return "".join(
+            block.get("text", "")
+            for block in raw
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+
+    if isinstance(raw, dict):
+        return json.dumps(raw, ensure_ascii=False)
+
+    return "" if raw is None else str(raw)
+
+
 def parse_tool_payload(raw: Any) -> dict[str, Any] | None:
     """Le contenu d'un résultat d'outil, lu comme l'objet JSON qu'il porte.
 
@@ -25,18 +47,12 @@ def parse_tool_payload(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, dict):
         return raw
 
-    if isinstance(raw, list):
-        raw = "".join(
-            block.get("text", "")
-            for block in raw
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
-
-    if not isinstance(raw, str) or not raw.strip():
+    text = tool_text(raw)
+    if not text.strip():
         return None
 
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return None
 

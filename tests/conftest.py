@@ -17,21 +17,17 @@ os.environ.setdefault("DB_USER", "postgres")
 os.environ.setdefault("DB_NAME", "mass_test")
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-test")
 
-from tests.fakes import FakeApprovalLog, FakeTool
+from tests.fakes import (
+    EMAIL_PREVIEW,
+    EMAIL_SENT,
+    FakeApprovalLog,
+    FakeEngagingTool,
+)
 
 
 @pytest.fixture
-def send_email_tool() -> FakeTool:
-    return FakeTool(
-        "send_email",
-        {
-            "sent": True,
-            "receiver": "commission@example.org",
-            "subject": "Sortie de samedi",
-            "historyId": "EMH0042",
-            "message": "Courriel remis et tracé dans l'historique.",
-        },
-    )
+def send_email_tool() -> FakeEngagingTool:
+    return FakeEngagingTool("send_email", preview=EMAIL_PREVIEW, outcome=EMAIL_SENT)
 
 
 @pytest.fixture

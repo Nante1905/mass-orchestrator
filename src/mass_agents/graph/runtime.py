@@ -221,10 +221,17 @@ def _token_event(chunk: Any) -> TokenEvent | None:
 
     La plupart des fragments ne portent pas de texte — ils construisent un appel
     d'outil bloc par bloc. Les diffuser ferait clignoter une réponse vide.
+
+    Seuls les messages de l'assistant sont diffusés : le mode `messages` relaie
+    aussi ceux que les nœuds renvoient, dont les résultats d'outils — du JSON
+    brut, adresses comprises, qui n'a rien à faire dans une bulle.
     """
     try:
         message, metadata = chunk
     except (TypeError, ValueError):
+        return None
+
+    if not isinstance(message, AIMessage):
         return None
 
     text = _text_of(getattr(message, "content", None))

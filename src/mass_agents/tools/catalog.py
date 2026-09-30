@@ -97,19 +97,3 @@ ENGAGING_DESCRIPTIONS: Final[dict[str, str]] = {
         "message."
     ),
 }
-
-# -- Transitoire -------------------------------------------------------------
-# La répartition par agent, lue par `agents/specialists.py` jusqu'au passage à
-# l'agent unique (lot 2), qui la supprimera avec lui.
-
-ANALYST_TOOLS: Final[tuple[str, ...]] = READ_TOOLS
-EDITOR_TOOLS: Final[tuple[str, ...]] = (
-    *DRAFT_TOOLS,
-    "list_events",
-    "get_event_details",
-)
-OPERATIONS_TOOLS: Final[tuple[str, ...]] = (
-    *ENGAGING_TOOL_ORDER,
-    "get_event_details",
-    "list_members",
-)

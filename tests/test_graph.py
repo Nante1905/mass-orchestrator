@@ -1,8 +1,8 @@
 """La forme du graphe, et l'authentification de la façade.
 
 Deux vérifications qui ne demandent ni base ni modèle : que le câblage
-corresponde à ce que le plan décrit, et que la façade refuse un appel sans jeton
-avec l'en-tête qu'un client conforme sait lire.
+corresponde à ce que `builder.py` décrit, et que la façade refuse un appel sans
+jeton avec l'en-tête qu'un client conforme sait lire.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from mass_agents.agents import ANALYST, EDITOR, OPERATIONS
 from mass_agents.auth import read_bearer_token
 from mass_agents.domain import AdminAuthError
 from mass_agents.graph import build_graph
@@ -21,45 +20,47 @@ def graphe():
     return build_graph(InMemorySaver())
 
 
-def test_les_cinq_noeuds_sont_la(graphe):
+def _cibles(graphe, source: str) -> set[str]:
+    return {a.target for a in graphe.get_graph().edges if a.source == source}
+
+
+def test_les_quatre_noeuds_sont_la(graphe):
     noeuds = set(graphe.get_graph().nodes)
 
-    assert {"superviseur", ANALYST, EDITOR, OPERATIONS, "validation"} <= noeuds
+    assert {"agent", "outils", "apercu", "validation"} <= noeuds
 
 
-def test_le_run_commence_par_le_superviseur(graphe):
-    depart = [
-        arete.target
-        for arete in graphe.get_graph().edges
-        if arete.source == "__start__"
-    ]
-
-    assert depart == ["superviseur"]
+def test_le_run_commence_par_l_agent(graphe):
+    assert _cibles(graphe, "__start__") == {"agent"}
 
 
-def test_aucun_specialiste_ne_termine_le_run(graphe):
-    """C'est le superviseur qui conclut, et lui seul.
+def test_seul_l_agent_termine_le_run(graphe):
+    """La réponse finale est un message de l'agent, rédigé en connaissance de
+    tout ce que les outils ont rendu."""
+    sources_de_fin = {
+        a.source for a in graphe.get_graph().edges if a.target == "__end__"
+    }
 
-    Un spécialiste qui pourrait atteindre `END` rendrait une réponse rédigée
-    sans vue sur le reste du fil.
-    """
-    aretes = graphe.get_graph().edges
-
-    for specialiste in (ANALYST, EDITOR, OPERATIONS):
-        cibles = {a.target for a in aretes if a.source == specialiste}
-        assert cibles <= {"superviseur", "validation"}
+    assert sources_de_fin == {"agent"}
 
 
-def test_les_ecritures_engageantes_passent_par_la_validation(graphe):
-    cibles = {a.target for a in graphe.get_graph().edges if a.source == OPERATIONS}
+def test_l_execution_des_outils_ne_mene_pas_a_la_validation(graphe):
+    """Un geste engageant passe toujours par l'aperçu avant la validation :
+    c'est là que `confirmed` est forcé à faux."""
+    assert _cibles(graphe, "outils") == {"agent", "apercu"}
+    assert _cibles(graphe, "agent") == {"outils", "apercu", "__end__"}
 
-    assert "validation" in cibles
+
+def test_seul_l_apercu_mene_a_la_validation(graphe):
+    sources = {
+        a.source for a in graphe.get_graph().edges if a.target == "validation"
+    }
+
+    assert sources == {"apercu"}
 
 
-def test_la_validation_rend_la_main_au_superviseur(graphe):
-    cibles = {a.target for a in graphe.get_graph().edges if a.source == "validation"}
-
-    assert cibles == {"superviseur"}
+def test_la_validation_rend_la_main_a_l_agent(graphe):
+    assert _cibles(graphe, "validation") == {"agent"}
 
 
 @pytest.mark.parametrize(

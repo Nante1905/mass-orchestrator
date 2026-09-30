@@ -1,37 +1,32 @@
-"""La validation humaine. C'est le nœud qui justifie tout le reste.
+"""La validation humaine.
 
 Le déroulé tient en trois temps :
 
-1. L'agent des opérations a appelé `send_email` ou `mark_attendance` **sans**
-   `confirmed`. `mass-mcp` n'a donc rien écrit : il a rendu l'aperçu.
+1. Le nœud d'aperçu a appelé `send_email` ou `mark_attendance` avec
+   `confirmed: false`. `mass-mcp` n'a rien écrit : il a rendu l'aperçu.
 2. Ce nœud suspend le graphe par `interrupt(aperçu)`. L'état est checkpointé ;
    le service peut redémarrer entre-temps sans que la validation soit perdue.
 3. La reprise arrive par `Command(resume=décision)`. Approuvé, le nœud rejoue
-   **le même** outil avec `confirmed: true`. Refusé, il n'appelle rien et le dit
-   dans le fil.
+   **le même** outil avec `confirmed: true`. Refusé, il n'appelle rien.
 
-Deux points méritent d'être explicités.
+Dans les deux cas, la décision revient à l'agent comme **le résultat de son
+propre appel** : un `ToolMessage` rattaché à l'identifiant de l'appel d'origine.
+Le modèle lit ce qui s'est réellement passé, et le fil reste valide pour l'API —
+chaque `tool_use` y a son `tool_result`.
 
 **L'aperçu n'est pas reformaté.** Celui de `mass-mcp` est déjà la charge utile :
-destinataires résolus, corps intégral, nombre de courriels, aperçu nominatif des
-pointages. Le réécrire ici ferait diverger ce qui est montré de ce qui a été
-calculé — et c'est l'aperçu, pas nos arguments, qui engage le nom de
-l'association.
-
-**La garantie est double par construction.** Même si le superviseur routait mal,
-même si ce nœud était contourné, `mass-mcp` refuserait d'écrire sans
-`confirmed`. Ce nœud n'est pas la sécurité : il est ce qui permet à la sécurité
-d'être franchie légitimement, avec une trace de qui a relu quoi.
+destinataires résolus, corps intégral, liste nominative des pointages. Le
+réécrire ici ferait diverger ce qui est montré de ce qui a été calculé.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.types import Command, interrupt
+from langgraph.types import interrupt
 
 from mass_agents.domain import (
     CONSEQUENCES,
@@ -39,16 +34,11 @@ from mass_agents.domain import (
     ApprovalRequest,
     PendingAction,
 )
-from mass_agents.graph.context import run_context
-from mass_agents.graph.nodes.supervisor import SUPERVISOR
+from mass_agents.graph.context import RunContext, run_context
 from mass_agents.graph.state import OrchestratorState
-from mass_agents.tools.payload import parse_tool_payload
+from mass_agents.tools import CONFIRMATION_PARAM, parse_tool_payload, tool_text
 
 logger = logging.getLogger(__name__)
-
-VALIDATION = "validation"
-
-ValidationDestination = Literal["superviseur"]
 
 _TITLES = {
     "send_email": "Envoyer ce courriel ?",
@@ -56,19 +46,16 @@ _TITLES = {
 }
 
 
-async def validation_node(
-    state: OrchestratorState, config: RunnableConfig
-) -> Command[ValidationDestination]:
+async def validation_node(state: OrchestratorState, config: RunnableConfig) -> dict:
     pending = state.get("pending_action")
     if pending is None:
-        # Le nœud a été atteint sans écriture en attente : rien à valider, et
-        # surtout rien à inventer. On rend la main plutôt que d'échouer, le fil
-        # reste cohérent.
-        logger.warning("Nœud de validation atteint sans action en attente")
-        return Command(goto=SUPERVISOR, update={"next": SUPERVISOR})
+        # Le routage n'envoie ici qu'avec une action en attente : y arriver sans
+        # signalerait un décalage entre `routing.py` et ce nœud.
+        logger.error("Nœud de validation atteint sans action en attente")
+        return {}
 
     context = run_context(config)
-    thread_id = config["configurable"]["thread_id"] # type: ignore
+    thread_id = config["configurable"]["thread_id"]  # type: ignore[index]
 
     request = ApprovalRequest(
         tool_name=pending.tool_name,
@@ -94,16 +81,9 @@ async def validation_node(
         logger.info(
             "Écriture refusée : %s par %s", pending.tool_name, context.admin.user_id
         )
-        return Command(
-            goto=SUPERVISOR,
-            update={
-                "messages": [AIMessage(content=_refusal_text(pending, decision))],
-                "next": SUPERVISOR,
-                "pending_action": None,
-            },
-        )
+        return _answer(pending, _refusal_text(decision))
 
-    outcome, text = await _execute(context, pending)
+    outcome, text, failed = await _execute(context, pending)
 
     await context.approvals.record(
         thread_id=thread_id,
@@ -114,74 +94,71 @@ async def validation_node(
         outcome=outcome,
     )
 
-    return Command(
-        goto=SUPERVISOR,
-        update={
-            "messages": [AIMessage(content=text)],
-            "next": SUPERVISOR,
-            "pending_action": None,
-        },
-    )
+    return _answer(pending, text, failed=failed)
 
 
 async def _execute(
-    context, pending: PendingAction
-) -> tuple[dict[str, Any] | None, str]:
+    context: RunContext, pending: PendingAction
+) -> tuple[dict[str, Any] | None, str, bool]:
     """Rejoue le même outil, confirmé.
 
-    « Le même » est littéral : les arguments d'origine, augmentés du seul
-    `confirmed`. Les recalculer, ou laisser un modèle les reformuler, ferait
-    partir un message qui n'est pas celui qui a été relu.
+    « Le même » est littéral : les arguments conservés par l'aperçu, augmentés
+    du seul `confirmed`. Les recalculer, ou laisser un modèle les reformuler,
+    ferait partir un message qui n'est pas celui qui a été relu.
+
+    Rend le résultat structuré (pour le journal), le texte rendu à l'agent, et
+    si l'exécution a échoué.
     """
     tool = context.toolset.get(pending.tool_name)
 
     try:
-        raw = await tool.ainvoke({**pending.arguments, "confirmed": True})
+        raw = await tool.ainvoke({**pending.arguments, CONFIRMATION_PARAM: True})
     except Exception as error:
-        # L'échec est rendu dans le fil et non levé : le run continue, le
-        # superviseur pourra l'expliquer. Une exception ici sortirait de la
-        # boucle et laisserait l'utilisateur sans réponse après avoir approuvé.
+        # L'échec est rendu à l'agent et non levé : l'utilisateur a approuvé, il
+        # doit savoir ce qui s'est passé ensuite. On ne peut pas affirmer que
+        # rien n'est parti — une coupure réseau peut survenir après l'envoi.
         logger.exception("Échec de l'exécution confirmée de %s", pending.tool_name)
         return (
             {"error": str(error)},
-            f"L'action n'a pas pu être exécutée : {error}. Rien n'a été "
-            "enregistré ; la demande est à reprendre.",
+            (
+                f"Approuvé par l'administrateur, mais l'exécution a échoué : "
+                f"{error}. Il n'est pas certain que rien n'ait été fait : "
+                "invite l'utilisateur à vérifier dans le back-office avant de "
+                "reproposer ce geste."
+            ),
+            True,
         )
 
-    outcome = parse_tool_payload(raw)
     logger.info("Écriture confirmée exécutée : %s", pending.tool_name)
-    return outcome, _outcome_text(pending, outcome)
+    return (
+        parse_tool_payload(raw),
+        f"Approuvé par l'administrateur et exécuté. Réponse du serveur : "
+        f"{tool_text(raw)}",
+        False,
+    )
 
 
-def _refusal_text(pending: PendingAction, decision: ApprovalDecision) -> str:
-    action = "L'envoi" if pending.tool_name == "send_email" else "Le pointage"
+def _refusal_text(decision: ApprovalDecision) -> str:
     reason = f" Motif indiqué : {decision.reason}" if decision.reason else ""
     return (
-        f"{action} a été refusé et n'a pas eu lieu — rien n'a été modifié.{reason} "
-        "Dites-moi ce qu'il faut changer si vous voulez le reprendre."
+        "Refusé par l'administrateur : rien n'a été envoyé ni enregistré."
+        f"{reason}"
     )
 
 
-def _outcome_text(pending: PendingAction, outcome: dict[str, Any] | None) -> str:
-    """Ce qu'on annonce après coup, en s'appuyant sur ce que l'outil a rapporté.
-
-    On préfère le message du serveur au nôtre quand il existe : c'est lui qui
-    sait combien d'envois ont abouti et lesquels ont échoué, et un résumé écrit
-    ici finirait par mentir le jour où l'API changera.
-    """
-    if outcome is None:
-        return "Action exécutée après votre validation."
-
-    if error := outcome.get("error"):
-        return f"L'action a échoué après validation : {error}"
-
-    reported = outcome.get("message")
-    prefix = (
-        "Envoi effectué après votre validation."
-        if pending.tool_name == "send_email"
-        else "Pointage enregistré après votre validation."
-    )
-    return f"{prefix} {reported}" if reported else prefix
+def _answer(pending: PendingAction, content: str, *, failed: bool = False) -> dict:
+    """La décision, rendue à l'agent comme le résultat de son appel."""
+    return {
+        "messages": [
+            ToolMessage(
+                content=content,
+                tool_call_id=pending.tool_call_id,
+                name=pending.tool_name,
+                status="error" if failed else "success",
+            )
+        ],
+        "pending_action": None,
+    }
 
 
 def _decision_of(raw: Any) -> ApprovalDecision:

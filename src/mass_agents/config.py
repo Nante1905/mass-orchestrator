@@ -15,10 +15,14 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import quote
 
 from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: Le niveau d'effort demandé au modèle (`output_config.effort`).
+Effort = Literal["low", "medium", "high"]
 
 
 class _Env(BaseSettings):
@@ -47,9 +51,10 @@ class _Env(BaseSettings):
     ANTHROPIC_API_KEY: str = Field(min_length=1)
     MODEL: str = "claude-opus-5"
     MODEL_MAX_TOKENS: int = Field(default=8_192, ge=1)
+    AGENT_EFFORT: Effort = "high"
 
-    MAX_TURNS: int = Field(default=12, ge=1)
-    MAX_TOKENS_PER_THREAD: int = Field(default=400_000, ge=1)
+    MAX_STEPS: int = Field(default=15, ge=1)
+    MAX_TOKENS_PER_REQUEST: int = Field(default=400_000, ge=1)
     RUN_TIMEOUT_S: float = Field(default=300.0, gt=0)
 
 
@@ -116,19 +121,24 @@ class LlmConfig:
     api_key: str
     model: str
     max_tokens: int
+    effort: Effort
 
 
 @dataclass(frozen=True, slots=True)
 class LimitsConfig:
-    """Plafonds durs.
+    """Plafonds durs, par demande de l'utilisateur.
 
     Ils ne sont pas là pour régler la qualité mais pour borner la dépense : un
     graphe qui boucle facture un appel de modèle à chaque tour, et personne ne
     s'en aperçoit avant la facture.
+
+    « Par demande » et non par fil : un plafond sur la vie du fil confondrait la
+    protection contre une boucle avec la longueur d'une conversation, et rendrait
+    un fil définitivement muet au bout de quelques questions.
     """
 
-    max_turns: int
-    max_tokens_per_thread: int
+    max_steps: int
+    max_tokens_per_request: int
     run_timeout_s: float
 
 
@@ -167,10 +177,11 @@ def _build(env: _Env) -> AppConfig:
             api_key=env.ANTHROPIC_API_KEY,
             model=env.MODEL,
             max_tokens=env.MODEL_MAX_TOKENS,
+            effort=env.AGENT_EFFORT,
         ),
         limits=LimitsConfig(
-            max_turns=env.MAX_TURNS,
-            max_tokens_per_thread=env.MAX_TOKENS_PER_THREAD,
+            max_steps=env.MAX_STEPS,
+            max_tokens_per_request=env.MAX_TOKENS_PER_REQUEST,
             run_timeout_s=env.RUN_TIMEOUT_S,
         ),
     )

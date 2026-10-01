@@ -6,7 +6,9 @@ est exactement ce que l'enveloppe `ApiResponse` existe pour éviter.
 
 Le choix du code suit celui de `mass-backend` : 401 quand le jeton ne vaut rien,
 403 quand il est authentique mais que le compte n'est plus administrateur, 404
-quand le fil n'est pas à l'appelant — qu'il existe ou non.
+quand le fil n'est pas à l'appelant — qu'il existe ou non. 409 quand le fil
+n'est pas dans l'état que la requête suppose : un run déjà en cours, une
+validation en attente, ou aucune à trancher.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from mass_agents.api.responses import ApiResponse
 from mass_agents.domain import (
     AdminAuthError,
     MassAgentsError,
+    ThreadConflictError,
     ThreadNotFoundError,
     ToolsetError,
 )
@@ -52,6 +55,12 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ThreadNotFoundError)
     async def _thread(_: Request, error: ThreadNotFoundError):
         return _failure(404, str(error))
+
+    @app.exception_handler(ThreadConflictError)
+    async def _conflict(_: Request, error: ThreadConflictError):
+        # 409 : la requête est bien formée, c'est l'état du fil qui l'empêche.
+        # Le message dit quoi faire — attendre, ou trancher la validation.
+        return _failure(409, str(error))
 
     @app.exception_handler(ToolsetError)
     async def _toolset(_: Request, error: ToolsetError):

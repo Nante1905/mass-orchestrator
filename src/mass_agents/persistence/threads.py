@@ -18,7 +18,7 @@ from datetime import datetime
 
 from psycopg_pool import AsyncConnectionPool
 
-from mass_agents.domain import ThreadNotFoundError
+from mass_agents.domain import ThreadBusyError, ThreadNotFoundError
 
 _INSERT = """
     insert into thread (id, owner_user_id, title)
@@ -43,15 +43,40 @@ _SELECT_BY_OWNER = """
     limit %s offset %s
 """
 
+# Prend le verrou du fil, s'il est libre ou abandonné, en une seule instruction :
+# deux requêtes simultanées ne peuvent pas le prendre toutes les deux.
+#
 # `coalesce` sur le titre : il est posé une fois, au premier message, et les
 # tours suivants ne doivent pas l'écraser — surtout pas par le texte d'une
 # relance de deux mots.
-_TOUCH = """
+_ACQUIRE = """
     update thread
-    set updated_at = now(), title = coalesce(title, %s)
+    set run_started_at = now(), updated_at = now(), title = coalesce(title, %s)
     where id = %s and owner_user_id = %s
-    returning id
+      and (run_started_at is null
+           or run_started_at < now() - make_interval(secs => %s))
+    returning run_started_at
 """
+
+# Ne rend que le verrou qu'on détient : si le nôtre a été jugé abandonné et
+# repris par un autre run, celui-là ne doit pas perdre le sien.
+_RELEASE = """
+    update thread
+    set run_started_at = null
+    where id = %s and run_started_at = %s
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class RunLease:
+    """Le verrou d'un fil, tel qu'un run le détient.
+
+    L'heure de prise sert de jeton : c'est elle qui permet de ne rendre que son
+    propre verrou.
+    """
+
+    thread_id: str
+    started_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,20 +125,45 @@ class ThreadRepository:
             rows = await cursor.fetchall()
         return [_to_thread(row) for row in rows] # type: ignore
 
-    async def touch(
-        self, thread_id: str, owner_user_id: str, *, title: str | None = None
-    ) -> None:
-        """Marque le fil comme actif, et lui donne un titre s'il n'en a pas.
+    async def acquire_run(
+        self,
+        thread_id: str,
+        owner_user_id: str,
+        *,
+        stale_after_s: float,
+        title: str | None = None,
+    ) -> RunLease:
+        """Le verrou du fil, pour la durée d'un run.
 
-        Sert aussi d'autorisation pour un run : une mise à jour qui ne touche
-        aucune ligne signifie que le fil n'est pas à cet appelant, et le run ne
-        doit pas commencer.
+        Sert aussi d'autorisation : on ne prend que le verrou d'un fil qu'on
+        possède. Un verrou plus ancien que `stale_after_s` est considéré comme
+        abandonné — un processus arrêté en plein run ne bloque pas le fil pour
+        toujours.
+
+        Lève `ThreadNotFoundError` si le fil n'est pas à l'appelant,
+        `ThreadBusyError` si un run y est déjà en cours.
         """
         async with self._pool.connection() as conn:
-            cursor = await conn.execute(_TOUCH, (title, thread_id, owner_user_id))
+            cursor = await conn.execute(
+                _ACQUIRE, (title, thread_id, owner_user_id, stale_after_s)
+            )
             row = await cursor.fetchone()
+
         if row is None:
-            raise ThreadNotFoundError(f"Aucune conversation {thread_id} pour ce compte")
+            # Rien de pris : soit le fil n'est pas à l'appelant, soit il est
+            # occupé. La propriété se vérifie en premier, pour ne pas dire à un
+            # curieux qu'un identifiant existe.
+            await self.get_owned(thread_id, owner_user_id)
+            raise ThreadBusyError(
+                "Une demande est déjà en cours sur cette conversation. "
+                "Attendez sa fin avant d'en envoyer une autre."
+            )
+
+        return RunLease(thread_id=thread_id, started_at=row["run_started_at"])
+
+    async def release_run(self, lease: RunLease) -> None:
+        async with self._pool.connection() as conn:
+            await conn.execute(_RELEASE, (lease.thread_id, lease.started_at))
 
 
 def _to_thread(row: dict) -> Thread:

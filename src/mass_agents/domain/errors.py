@@ -38,6 +38,35 @@ class ThreadNotFoundError(MassAgentsError):
     """
 
 
+class ThreadConflictError(MassAgentsError):
+    """La demande est valide, mais pas dans l'état où se trouve le fil.
+
+    Rendue avant l'ouverture du flux, en 409 : une fois les en-têtes SSE
+    envoyés, un refus se lirait comme une conversation vide.
+    """
+
+
+class ThreadBusyError(ThreadConflictError):
+    """Un run est déjà en cours sur ce fil.
+
+    Deux runs concurrents partiraient du même checkpoint et l'écraseraient l'un
+    l'autre — et deux reprises concurrentes d'une même validation
+    exécuteraient deux fois le geste approuvé.
+    """
+
+
+class ApprovalPendingError(ThreadConflictError):
+    """Un nouveau message alors qu'une validation attend sa décision.
+
+    Laisser passer le message abandonnerait la validation en silence, avec un
+    appel d'outil resté sans réponse dans le fil.
+    """
+
+
+class NoPendingApprovalError(ThreadConflictError):
+    """Une décision alors qu'aucune validation n'est en attente."""
+
+
 class ToolsetError(MassAgentsError):
     """Le serveur MCP n'a pas rendu l'outillage attendu.
 

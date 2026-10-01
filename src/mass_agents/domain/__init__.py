@@ -14,8 +14,12 @@ from mass_agents.domain.actions import (
 )
 from mass_agents.domain.errors import (
     AdminAuthError,
+    ApprovalPendingError,
     MassAgentsError,
+    NoPendingApprovalError,
     RunLimitError,
+    ThreadBusyError,
+    ThreadConflictError,
     ThreadNotFoundError,
     ToolsetError,
 )
@@ -25,10 +29,14 @@ __all__ = [
     "ENGAGING_TOOLS",
     "AdminAuthError",
     "ApprovalDecision",
+    "ApprovalPendingError",
     "ApprovalRequest",
     "MassAgentsError",
+    "NoPendingApprovalError",
     "PendingAction",
     "RunLimitError",
+    "ThreadBusyError",
+    "ThreadConflictError",
     "ThreadNotFoundError",
     "ToolsetError",
 ]

@@ -14,6 +14,11 @@ propre appel** : un `ToolMessage` rattaché à l'identifiant de l'appel d'origin
 Le modèle lit ce qui s'est réellement passé, et le fil reste valide pour l'API —
 chaque `tool_use` y a son `tool_result`.
 
+**Une exécution au plus par appel.** La décision est inscrite au journal avant
+l'exécution, sous l'identifiant de l'appel d'outil ; une reprise rejouée
+retrouve la décision déjà prise au lieu d'exécuter à nouveau. Voir
+`persistence/approvals.py`.
+
 **L'aperçu n'est pas reformaté.** Celui de `mass-mcp` est déjà la charge utile :
 destinataires résolus, corps intégral, liste nominative des pointages. Le
 réécrire ici ferait diverger ce qui est montré de ce qui a été calculé.
@@ -21,6 +26,8 @@ réécrire ici ferait diverger ce qui est montré de ce qui a été calculé.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from typing import Any
 
@@ -36,6 +43,7 @@ from mass_agents.domain import (
 )
 from mass_agents.graph.context import RunContext, run_context
 from mass_agents.graph.state import OrchestratorState
+from mass_agents.persistence import Claim
 from mass_agents.tools import CONFIRMATION_PARAM, parse_tool_payload, tool_text
 
 logger = logging.getLogger(__name__)
@@ -69,45 +77,65 @@ async def validation_node(state: OrchestratorState, config: RunnableConfig) -> d
     # de bord avant cette ligne.
     decision = _decision_of(interrupt(request.model_dump()))
 
-    if not decision.approved:
-        await context.approvals.record(
+    # La décision est écrite avant toute exécution, et c'est elle qui
+    # l'autorise : une ligne par appel d'outil, jamais deux.
+    try:
+        claim = await context.approvals.claim(
             thread_id=thread_id,
             admin=context.admin,
             action=pending,
-            approved=False,
+            approved=decision.approved,
             reason=decision.reason,
-            outcome=None,
         )
+    except Exception:
+        logger.exception("Journal des validations indisponible : thread=%s", thread_id)
+        if not decision.approved:
+            return _answer(pending, _refusal_text(decision))
+        return _answer(pending, _UNTRACEABLE, failed=True)
+
+    if not claim.acquired:
+        # Cet appel a déjà été décidé — reprise rejouée, double clic, arrêt du
+        # service après coup. La décision d'alors fait foi.
+        logger.warning(
+            "Décision déjà prise sur %s (%s) : pas de réexécution",
+            pending.tool_call_id,
+            claim.status,
+        )
+        return _answer(pending, _replay_text(claim), failed=claim.status != "done")
+
+    if not decision.approved:
         logger.info(
             "Écriture refusée : %s par %s", pending.tool_name, context.admin.user_id
         )
         return _answer(pending, _refusal_text(decision))
 
-    outcome, text, failed = await _execute(context, pending)
-
-    await context.approvals.record(
-        thread_id=thread_id,
-        admin=context.admin,
-        action=pending,
-        approved=True,
-        reason=decision.reason,
-        outcome=outcome,
-    )
-
+    # Protégé de l'annulation : si le run est interrompu pendant l'appel — délai
+    # dépassé, navigateur fermé —, l'exécution et son inscription au journal
+    # vont quand même à leur terme. Sans cela, un courriel parti resterait noté
+    # `executing`, et l'utilisateur ne saurait pas qu'il est parti.
+    text, failed = await asyncio.shield(_execute(context, pending, claim))
     return _answer(pending, text, failed=failed)
 
 
+#: Rendu quand le journal ne peut pas enregistrer une approbation.
+_UNTRACEABLE = (
+    "Approuvé par l'administrateur, mais non exécuté : le journal des "
+    "validations est indisponible, et un geste qui engage l'association ne part "
+    "pas sans trace. Rien n'a été fait ; l'utilisateur pourra le reproposer "
+    "plus tard."
+)
+
+
 async def _execute(
-    context: RunContext, pending: PendingAction
-) -> tuple[dict[str, Any] | None, str, bool]:
-    """Rejoue le même outil, confirmé.
+    context: RunContext, pending: PendingAction, claim: Claim
+) -> tuple[str, bool]:
+    """Rejoue le même outil, confirmé, puis inscrit l'issue au journal.
 
     « Le même » est littéral : les arguments conservés par l'aperçu, augmentés
     du seul `confirmed`. Les recalculer, ou laisser un modèle les reformuler,
     ferait partir un message qui n'est pas celui qui a été relu.
 
-    Rend le résultat structuré (pour le journal), le texte rendu à l'agent, et
-    si l'exécution a échoué.
+    Rend le texte destiné à l'agent, et si l'exécution a échoué.
     """
     tool = context.toolset.get(pending.tool_name)
 
@@ -118,20 +146,22 @@ async def _execute(
         # doit savoir ce qui s'est passé ensuite. On ne peut pas affirmer que
         # rien n'est parti — une coupure réseau peut survenir après l'envoi.
         logger.exception("Échec de l'exécution confirmée de %s", pending.tool_name)
+        await context.approvals.complete(
+            claim, outcome={"error": str(error)}, failed=True
+        )
         return (
-            {"error": str(error)},
-            (
-                f"Approuvé par l'administrateur, mais l'exécution a échoué : "
-                f"{error}. Il n'est pas certain que rien n'ait été fait : "
-                "invite l'utilisateur à vérifier dans le back-office avant de "
-                "reproposer ce geste."
-            ),
+            f"Approuvé par l'administrateur, mais l'exécution a échoué : "
+            f"{error}. Il n'est pas certain que rien n'ait été fait : invite "
+            "l'utilisateur à vérifier dans le back-office avant de reproposer "
+            "ce geste.",
             True,
         )
 
     logger.info("Écriture confirmée exécutée : %s", pending.tool_name)
+    await context.approvals.complete(
+        claim, outcome=parse_tool_payload(raw), failed=False
+    )
     return (
-        parse_tool_payload(raw),
         f"Approuvé par l'administrateur et exécuté. Réponse du serveur : "
         f"{tool_text(raw)}",
         False,
@@ -140,10 +170,36 @@ async def _execute(
 
 def _refusal_text(decision: ApprovalDecision) -> str:
     reason = f" Motif indiqué : {decision.reason}" if decision.reason else ""
-    return (
-        "Refusé par l'administrateur : rien n'a été envoyé ni enregistré."
-        f"{reason}"
+    return f"Refusé par l'administrateur : le geste n'est pas exécuté.{reason}"
+
+
+def _replay_text(claim: Claim) -> str:
+    """Ce qu'on dit d'un appel déjà décidé, selon ce que la décision a donné."""
+    outcome = (
+        json.dumps(claim.outcome, ensure_ascii=False) if claim.outcome else "aucune"
     )
+    match claim.status:
+        case "done":
+            return (
+                "Déjà exécuté après une validation précédente — pas de seconde "
+                f"exécution. Réponse du serveur à l'époque : {outcome}"
+            )
+        case "failed":
+            return (
+                "Une exécution précédente de ce geste a échoué ; il n'est pas "
+                f"rejoué. Erreur d'alors : {outcome}. Invite l'utilisateur à "
+                "vérifier dans le back-office avant de le reproposer."
+            )
+        case "refused":
+            return "Ce geste a déjà été refusé ; il n'est pas exécuté."
+        case _:
+            return (
+                "Une exécution de ce geste a déjà commencé sans que son issue "
+                "soit connue — le service a probablement été interrompu. Il "
+                "n'est pas rejoué, pour ne pas l'exécuter deux fois : invite "
+                "l'utilisateur à vérifier dans le back-office (historique des "
+                "courriels, pointages) ce qui a été fait."
+            )
 
 
 def _answer(pending: PendingAction, content: str, *, failed: bool = False) -> dict:

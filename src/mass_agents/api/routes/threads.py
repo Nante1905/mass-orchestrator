@@ -81,12 +81,13 @@ async def run_stream(
 ):
     """Un tour de conversation, diffusé au fil de l'eau.
 
-    La propriété du fil est contrôlée **avant** d'ouvrir le flux : une fois les
-    en-têtes SSE envoyés, il n'y a plus de code HTTP à rendre, et un refus se
-    lirait comme une conversation vide.
+    Propriété, verrou et état du fil sont contrôlés **avant** d'ouvrir le flux :
+    une fois les en-têtes SSE envoyés, il n'y a plus de code HTTP à rendre. 409
+    si un run est déjà en cours, ou si une validation attend sa décision.
     """
-    await orchestrator.ensure_owner(thread_id, caller.admin)
-    events = orchestrator.start(thread_id, caller.admin, caller.token, body.message)
+    events = await orchestrator.open_start(
+        thread_id, caller.admin, caller.token, body.message
+    )
     return sse_response(events, thread_id)
 
 
@@ -101,9 +102,11 @@ async def run_resume(
 
     C'est le jeton de *cette* requête qui servira à l'écriture confirmée, et
     c'est ce qui donne son sens à la trace : l'action est exécutée sous
-    l'identité de la personne qui vient de l'approuver.
+    l'identité de la personne qui vient de l'approuver. 409 si un run est déjà
+    en cours — une seconde reprise concurrente —, ou si rien n'est en attente.
     """
-    await orchestrator.ensure_owner(thread_id, caller.admin)
     decision = ApprovalDecision(approved=body.approved, reason=body.reason)
-    events = orchestrator.resume(thread_id, caller.admin, caller.token, decision)
+    events = await orchestrator.open_resume(
+        thread_id, caller.admin, caller.token, decision
+    )
     return sse_response(events, thread_id)

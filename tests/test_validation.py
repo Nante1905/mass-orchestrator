@@ -10,6 +10,7 @@ La décision revient à l'agent comme le résultat de son propre appel : un
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -20,7 +21,10 @@ from tests.fakes import (
     ADMIN,
     EMAIL_ARGUMENTS,
     EMAIL_PREVIEW,
+    EMAIL_SENT,
     BrokenTool,
+    FakeApprovalLog,
+    SlowTool,
     run_config,
 )
 
@@ -176,6 +180,113 @@ async def test_sans_action_en_attente_le_noeud_ne_suspend_rien(
 
     assert "__interrupt__" not in resultat
     assert send_email_tool.calls == []
+
+
+# -- une exécution au plus par appel ------------------------------------------
+
+
+async def test_une_reprise_rejouee_n_execute_pas_une_seconde_fois(
+    send_email_tool, approval_log
+):
+    """Le service s'arrête après l'envoi, avant d'avoir checkpointé : la
+    validation est toujours « en attente », et l'administrateur la réapprouve.
+    Le journal, lui, sait que c'est fait."""
+    config = run_config({"send_email": send_email_tool}, approval_log)
+    graphe = await _suspendu(config)
+    await graphe.ainvoke(Command(resume={"approved": True}), config)
+
+    # Un nouveau graphe, qui repart du checkpoint d'avant l'envoi.
+    rejoue = await _suspendu(config)
+    resultat = await rejoue.ainvoke(Command(resume={"approved": True}), config)
+
+    assert len(send_email_tool.calls) == 1
+    reponse = resultat["messages"][-1]
+    assert "Déjà exécuté" in reponse.content
+    assert reponse.status == "success"
+
+
+async def test_une_execution_a_l_issue_inconnue_n_est_pas_rejouee(send_email_tool):
+    """Une ligne restée à `executing` : le service est tombé pendant l'appel.
+    Le courriel est peut-être parti — on ne le renvoie pas à l'aveugle."""
+    journal = FakeApprovalLog()
+    journal.seed("fil-1", "e1", "executing")
+    config = run_config({"send_email": send_email_tool}, journal)
+    graphe = await _suspendu(config)
+
+    resultat = await graphe.ainvoke(Command(resume={"approved": True}), config)
+
+    assert send_email_tool.calls == []
+    reponse = resultat["messages"][-1]
+    assert reponse.status == "error"
+    assert "vérifier dans le back-office" in reponse.content
+
+
+async def test_un_refus_apres_execution_ne_pretend_pas_que_rien_n_est_parti(
+    send_email_tool,
+):
+    """Le geste a été exécuté puis le service est tombé ; l'administrateur,
+    revenu, refuse. Répondre « refusé, rien n'est parti » serait faux."""
+    journal = FakeApprovalLog()
+    journal.seed("fil-1", "e1", "done", outcome={"sent": True})
+    config = run_config({"send_email": send_email_tool}, journal)
+    graphe = await _suspendu(config)
+
+    resultat = await graphe.ainvoke(Command(resume={"approved": False}), config)
+
+    assert "Déjà exécuté" in resultat["messages"][-1].content
+
+
+async def test_sans_journal_rien_n_est_execute(send_email_tool):
+    """Un geste qui engage l'association ne part pas sans trace."""
+    config = run_config(
+        {"send_email": send_email_tool}, FakeApprovalLog(unavailable=True)
+    )
+    graphe = await _suspendu(config)
+
+    resultat = await graphe.ainvoke(Command(resume={"approved": True}), config)
+
+    assert send_email_tool.calls == []
+    reponse = resultat["messages"][-1]
+    assert reponse.status == "error"
+    assert "journal des validations est indisponible" in reponse.content
+
+
+async def test_sans_journal_un_refus_reste_un_refus(send_email_tool):
+    config = run_config(
+        {"send_email": send_email_tool}, FakeApprovalLog(unavailable=True)
+    )
+    graphe = await _suspendu(config)
+
+    resultat = await graphe.ainvoke(Command(resume={"approved": False}), config)
+
+    assert send_email_tool.calls == []
+    assert "Refusé" in resultat["messages"][-1].content
+
+
+async def test_un_run_interrompu_pendant_l_envoi_le_laisse_aboutir(approval_log):
+    """Délai dépassé ou navigateur fermé pendant l'appel confirmé : l'envoi et
+    son inscription au journal vont à leur terme. Une réapprobation ensuite
+    retrouve l'envoi fait, au lieu de le refaire."""
+    lent = SlowTool(
+        "send_email", preview=EMAIL_PREVIEW, outcome=EMAIL_SENT, delay_s=0.05
+    )
+    config = run_config({"send_email": lent}, approval_log)
+    graphe = await _suspendu(config)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            graphe.ainvoke(Command(resume={"approved": True}), config), timeout=0.01
+        )
+    await asyncio.sleep(0.1)
+
+    assert len(lent.calls) == 1
+    assert approval_log.entries[0]["status"] == "done"
+
+    # Le nœud n'a pas abouti : la validation est toujours en attente.
+    resultat = await graphe.ainvoke(Command(resume={"approved": True}), config)
+
+    assert len(lent.calls) == 1
+    assert "Déjà exécuté" in resultat["messages"][-1].content
 
 
 def test_l_apercu_du_serveur_est_repris_sans_retouche():

@@ -24,7 +24,12 @@ from langgraph.types import Command
 
 from mass_agents.auth import AdminIdentity
 from mass_agents.config import LimitsConfig, McpConfig
-from mass_agents.domain import ApprovalDecision, MassAgentsError
+from mass_agents.domain import (
+    ApprovalDecision,
+    ApprovalPendingError,
+    MassAgentsError,
+    NoPendingApprovalError,
+)
 from mass_agents.graph.context import RunContext, build_run_config, build_thread_config
 from mass_agents.graph.events import (
     ApprovalEvent,
@@ -38,7 +43,7 @@ from mass_agents.graph.events import (
     ToolCallEvent,
 )
 from mass_agents.graph.limits import steps_exhausted_message
-from mass_agents.persistence import ApprovalLog, Thread, ThreadRepository
+from mass_agents.persistence import ApprovalLog, RunLease, Thread, ThreadRepository
 from mass_agents.tools import build_mass_toolset
 
 logger = logging.getLogger(__name__)
@@ -51,6 +56,11 @@ _TITLE_LENGTH = 80
 #: `validation`. Multiplié par le plafond d'étapes, cela donne une limite de
 #: récursion qui ne se déclenche que si ce plafond était contourné.
 _SUPERSTEPS_PER_STEP = 4
+
+#: Marge ajoutée à la durée maximale d'un run avant de juger son verrou
+#: abandonné : l'exécution confirmée d'un geste va à son terme même après
+#: l'expiration du délai (voir le nœud de validation).
+_LEASE_MARGIN_S = 60.0
 
 
 class Orchestrator:
@@ -84,15 +94,6 @@ class Orchestrator:
             admin.user_id, limit=limit, offset=offset
         )
 
-    async def ensure_owner(self, thread_id: str, admin: AdminIdentity) -> None:
-        """Vérifie la propriété du fil sans rien faire d'autre.
-
-        Existe pour les routes en flux : une fois les en-têtes SSE envoyés, il
-        n'y a plus de code HTTP à rendre, et un refus se lirait comme une
-        conversation vide. Le contrôle doit donc précéder l'ouverture du flux.
-        """
-        await self._threads.get_owned(thread_id, admin.user_id)
-
     async def get_state(self, thread_id: str, admin: AdminIdentity) -> ThreadState:
         """L'état d'un fil, après contrôle de propriété.
 
@@ -125,20 +126,33 @@ class Orchestrator:
         )
 
     # -- runs ---------------------------------------------------------------
+    #
+    # Les deux points d'entrée font leurs contrôles **avant** de rendre le
+    # flux : propriété, verrou, état du fil. Une fois les en-têtes SSE envoyés,
+    # il n'y a plus de code HTTP à rendre, et un refus se lirait comme une
+    # conversation vide.
 
-    def start(
+    async def open_start(
         self, thread_id: str, admin: AdminIdentity, token: str, message: str
     ) -> AsyncIterator[GraphEvent]:
-        """Un tour de conversation, à partir d'un message de l'utilisateur."""
+        """Un tour de conversation, à partir d'un message de l'utilisateur.
+
+        Refusé si une validation attend sa décision : le message l'abandonnerait
+        en silence, avec un appel d'outil resté sans réponse dans le fil.
+        """
+        lease = await self._acquire(thread_id, admin, title=message[:_TITLE_LENGTH])
+        await self._check_state(
+            lease,
+            refuse_if_pending=ApprovalPendingError(
+                "Une validation attend votre décision sur cette conversation : "
+                "approuvez-la ou refusez-la avant d'envoyer un nouveau message."
+            ),
+        )
         return self._stream(
-            thread_id,
-            admin,
-            token,
-            {"messages": [HumanMessage(content=message)]},
-            title=message[:_TITLE_LENGTH],
+            lease, admin, token, {"messages": [HumanMessage(content=message)]}
         )
 
-    def resume(
+    async def open_resume(
         self,
         thread_id: str,
         admin: AdminIdentity,
@@ -152,24 +166,70 @@ class Orchestrator:
         attente hier soir reprend ce matin avec la session du jour, sans que
         rien n'ait à être migré ni rafraîchi.
         """
+        lease = await self._acquire(thread_id, admin)
+        await self._check_state(
+            lease,
+            refuse_if_idle=NoPendingApprovalError(
+                "Aucune validation n'est en attente sur cette conversation."
+            ),
+        )
         return self._stream(
-            thread_id, admin, token, Command(resume=decision.model_dump())
+            lease, admin, token, Command(resume=decision.model_dump())
         )
 
-    async def _stream(
-        self,
-        thread_id: str,
-        admin: AdminIdentity,
-        token: str,
-        payload: Any,
-        *,
-        title: str | None = None,
-    ) -> AsyncIterator[GraphEvent]:
-        # Sert d'autorisation autant que d'horodatage : une mise à jour qui ne
-        # touche aucune ligne signifie que le fil n'est pas à cet appelant, et
-        # le run ne doit pas commencer.
-        await self._threads.touch(thread_id, admin.user_id, title=title)
+    async def _acquire(
+        self, thread_id: str, admin: AdminIdentity, *, title: str | None = None
+    ) -> RunLease:
+        """Le verrou du fil. Il est jugé abandonné au-delà de la durée maximale
+        d'un run, construction de l'outillage comprise."""
+        return await self._threads.acquire_run(
+            thread_id,
+            admin.user_id,
+            stale_after_s=(
+                self._limits.run_timeout_s + self._mcp.timeout_s + _LEASE_MARGIN_S
+            ),
+            title=title,
+        )
 
+    async def _check_state(
+        self,
+        lease: RunLease,
+        *,
+        refuse_if_pending: MassAgentsError | None = None,
+        refuse_if_idle: MassAgentsError | None = None,
+    ) -> None:
+        """Refuse le run si le fil n'est pas dans l'état attendu — et rend alors
+        le verrou, que personne d'autre ne rendrait."""
+        try:
+            snapshot = await self._graph.aget_state(
+                build_thread_config(lease.thread_id)
+            )
+            pending = bool(snapshot.interrupts)
+            if pending and refuse_if_pending is not None:
+                raise refuse_if_pending
+            if not pending and refuse_if_idle is not None:
+                raise refuse_if_idle
+        except BaseException:
+            await self._threads.release_run(lease)
+            raise
+
+    async def _stream(
+        self, lease: RunLease, admin: AdminIdentity, token: str, payload: Any
+    ) -> AsyncIterator[GraphEvent]:
+        """Le run, diffusé — et le verrou rendu à la fin, quelle qu'elle soit.
+
+        Un flux jamais consommé ne passe pas par le `finally` : son verrou
+        expire alors de lui-même (voir `_acquire`).
+        """
+        try:
+            async for event in self._run(lease.thread_id, admin, token, payload):
+                yield event
+        finally:
+            await self._threads.release_run(lease)
+
+    async def _run(
+        self, thread_id: str, admin: AdminIdentity, token: str, payload: Any
+    ) -> AsyncIterator[GraphEvent]:
         try:
             toolset = await build_mass_toolset(token, self._mcp)
         except MassAgentsError as error:

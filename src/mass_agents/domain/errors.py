@@ -94,6 +94,15 @@ class SuggestionGenerationError(MassAgentsError):
     """
 
 
+class EmailDraftGenerationError(MassAgentsError):
+    """Le modèle n'a pas rendu de courriel utilisable, même en réessayant.
+
+    Un objet vide ou trop long pour sa colonne, un évènement cité qui n'est pas
+    dans l'agenda, une variable `{{…}}` que rien ne remplirait. Rendu en 502,
+    comme pour les posts : la demande était bonne, la dépendance a mal répondu.
+    """
+
+
 class RunLimitError(MassAgentsError):
     """Un plafond a été atteint : tours, jetons, ou durée.
 

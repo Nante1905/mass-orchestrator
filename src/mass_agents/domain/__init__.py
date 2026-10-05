@@ -15,6 +15,7 @@ from mass_agents.domain.actions import (
 from mass_agents.domain.errors import (
     AdminAuthError,
     ApprovalPendingError,
+    EmailDraftGenerationError,
     MassAgentsError,
     NoPendingApprovalError,
     RunLimitError,
@@ -33,6 +34,7 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalPendingError",
     "ApprovalRequest",
+    "EmailDraftGenerationError",
     "MassAgentsError",
     "NoPendingApprovalError",
     "PendingAction",

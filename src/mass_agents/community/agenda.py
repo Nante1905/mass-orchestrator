@@ -11,7 +11,7 @@ suggestions sur l'actualité : l'échec devient un avertissement, et la catégor
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import Any, Final
 
@@ -41,11 +41,16 @@ async def upcoming_mass_events(
     admin_token: str,
     mcp: McpConfig,
     build_toolset: ToolsetFactory = build_mass_toolset,
+    list_args: Mapping[str, Any] = LIST_ARGS,
 ) -> tuple[list[ContextItem], str | None]:
-    """Les évènements à venir, ou la raison pour laquelle on s'en passe."""
+    """Les évènements à venir, ou la raison pour laquelle on s'en passe.
+
+    `list_args` resserre ou élargit la lecture : un post ne parle que du public,
+    un courriel aux adhérents peut annoncer une soirée qui leur est réservée.
+    """
     try:
         toolset = await build_toolset(admin_token, mcp)
-        raw = await toolset.get("list_events").ainvoke(LIST_ARGS)
+        raw = await toolset.get("list_events").ainvoke(dict(list_args))
     except Exception as error:
         logger.warning("Agenda MASS indisponible : %s", error)
         return [], "L'agenda MASS est indisponible"
@@ -80,10 +85,14 @@ def _item(event: dict[str, Any]) -> ContextItem | None:
         # Comme le back-office (`format-amount.ts`) : « 20 000 Ar ».
         price = f"à partir de {round(prices[0]):,} Ar".replace(",", " ")
 
+    # Dit au modèle ce qu'il ne doit pas annoncer à tout le monde. Les posts ne
+    # lisent que le public : la mention ne les concerne pas.
+    reserved = " Réservé aux membres." if event.get("isPublic") is False else ""
+
     return ContextItem(
         kind="event",
         title=title.strip(),
-        summary=f"Le {_format(when)}, {location}. Entrée : {price}.",
+        summary=f"Le {_format(when)}, {location}. Entrée : {price}.{reserved}",
         publisher="MASS",
         url=None,
         published=when,

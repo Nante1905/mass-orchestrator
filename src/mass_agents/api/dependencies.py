@@ -21,6 +21,7 @@ from mass_agents.auth import AdminAuthenticator, AdminIdentity, read_bearer_toke
 from mass_agents.community import CommunityService
 from mass_agents.domain import AdminAuthError
 from mass_agents.graph import Orchestrator
+from mass_agents.mailing import EmailDraftService
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,10 @@ def get_community(request: Request) -> CommunityService:
     return request.app.state.community
 
 
+def get_mailing(request: Request) -> EmailDraftService:
+    return request.app.state.mailing
+
+
 async def current_caller(
     authenticator: Annotated[AdminAuthenticator, Depends(get_authenticator)],
     authorization: Annotated[str | None, Header()] = None,
@@ -61,3 +66,4 @@ async def current_caller(
 CurrentCaller = Annotated[Caller, Depends(current_caller)]
 OrchestratorDep = Annotated[Orchestrator, Depends(get_orchestrator)]
 CommunityDep = Annotated[CommunityService, Depends(get_community)]
+MailingDep = Annotated[EmailDraftService, Depends(get_mailing)]

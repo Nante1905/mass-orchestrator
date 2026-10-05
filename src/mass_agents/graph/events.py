@@ -56,6 +56,21 @@ class ToolCallEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ChartEvent:
+    """Un graphique à dessiner, tel que `generate_graph` l'a construit.
+
+    Le seul résultat d'outil qui atteigne l'interface : les autres sont de la
+    matière pour le modèle, celui-ci est fait pour être vu. `spec` est repris
+    sans retouche ; `version` permet à l'interface de reconnaître un format
+    qu'elle ne sait pas dessiner plutôt que d'afficher un graphique vide.
+    """
+
+    spec: dict[str, Any]
+    version: int
+    kind: Literal["chart"] = "chart"
+
+
+@dataclass(frozen=True, slots=True)
 class ApprovalEvent:
     """Le graphe est suspendu : une écriture attend une relecture humaine.
 
@@ -104,5 +119,11 @@ class ThreadState:
 
 
 GraphEvent = (
-    TokenEvent | MessageEvent | ToolCallEvent | ApprovalEvent | ErrorEvent | DoneEvent
+    TokenEvent
+    | MessageEvent
+    | ToolCallEvent
+    | ChartEvent
+    | ApprovalEvent
+    | ErrorEvent
+    | DoneEvent
 )

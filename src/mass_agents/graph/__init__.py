@@ -8,6 +8,7 @@ from mass_agents.graph.builder import build_graph
 from mass_agents.graph.context import RunContext, build_run_config, build_thread_config
 from mass_agents.graph.events import (
     ApprovalEvent,
+    ChartEvent,
     DoneEvent,
     ErrorEvent,
     GraphEvent,
@@ -22,6 +23,7 @@ from mass_agents.graph.state import OrchestratorState
 
 __all__ = [
     "ApprovalEvent",
+    "ChartEvent",
     "DoneEvent",
     "ErrorEvent",
     "GraphEvent",

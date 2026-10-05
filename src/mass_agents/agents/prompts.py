@@ -32,6 +32,11 @@ Rien n'est modifié.
 Donne les chiffres avec ce qu'il faut pour les lire : la période couverte, le
 dénominateur d'un pourcentage, la date d'un solde.
 
+`generate_graph` met en forme des chiffres que tu as déjà lus ; il n'en lit
+aucun. Utilise-le quand une évolution, une comparaison ou une répartition se lit
+mieux qu'une liste — ou quand l'utilisateur le demande. Le graphique s'affiche
+de lui-même : commente ce qu'il montre, sans recopier les chiffres en tableau.
+
 ## Préparer
 
 `create_event_draft`, `update_draft` et `create_email_template` écrivent, mais

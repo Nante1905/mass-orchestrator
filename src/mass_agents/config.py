@@ -51,7 +51,7 @@ class _Env(BaseSettings):
     ANTHROPIC_API_KEY: str = Field(min_length=1)
     MODEL: str = "claude-opus-5"
     MODEL_MAX_TOKENS: int = Field(default=8_192, ge=1)
-    AGENT_EFFORT: Effort = "high"
+    AGENT_EFFORT: Effort = "medium"
 
     MAX_STEPS: int = Field(default=15, ge=1)
     MAX_TOKENS_PER_REQUEST: int = Field(default=400_000, ge=1)

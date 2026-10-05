@@ -27,8 +27,14 @@ READ_TOOLS: Final[tuple[str, ...]] = (
     "get_attendance_stats",
     "get_finance_summary",
     "query_analytics",
+    "generate_graph",
 )
-"""Lecture seule."""
+"""Rien n'est modifié.
+
+`generate_graph` ne lit rien non plus : il met en forme des chiffres déjà lus.
+Il est rangé ici parce qu'il n'a aucun effet de bord — c'est ce critère, et non
+la lecture au sens strict, qui décide qu'un appel s'exécute sans détour.
+"""
 
 DRAFT_TOOLS: Final[tuple[str, ...]] = (
     "create_event_draft",

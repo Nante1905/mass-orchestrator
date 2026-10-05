@@ -9,6 +9,8 @@ rendu.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,6 +18,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.checkpoint.memory import InMemorySaver
 from tests.fakes import (
     ADMIN,
+    CHART_RESULT,
     EMAIL_ARGUMENTS,
     FakeApprovalLog,
     FakeThreads,
@@ -36,6 +39,7 @@ from mass_agents.domain import (
 )
 from mass_agents.graph import (
     ApprovalEvent,
+    ChartEvent,
     DoneEvent,
     ErrorEvent,
     MessageEvent,
@@ -48,8 +52,10 @@ from mass_agents.graph import runtime as module
 from mass_agents.graph.nodes import agent as agent_module
 
 LECTURE = tool_call("query_analytics", {"sql": "select 1"}, "l1")
+GRAPHIQUE = tool_call("generate_graph", {"chart_type": "bar", "title": "…"}, "g1")
 COURRIEL = tool_call("send_email", EMAIL_ARGUMENTS, "e1")
 OUI = ApprovalDecision(approved=True)
+DESSIN = ChartEvent(spec=CHART_RESULT["chart"], version=1)
 
 
 def _orchestrateur(
@@ -65,6 +71,7 @@ def _orchestrateur(
     outillage = FakeToolset(
         {
             "query_analytics": FakeTool("query_analytics", {"rows": [{"n": 12}]}),
+            "generate_graph": FakeTool("generate_graph", CHART_RESULT),
             "send_email": send_email_tool,
         }
     )
@@ -159,6 +166,45 @@ async def test_la_limite_de_recursion_se_lit_comme_un_plafond(
     erreur = next(e for e in events if isinstance(e, ErrorEvent))
     assert "Je m'arrête ici" in erreur.message
     assert events[-1] == DoneEvent(status="stopped", thread_id="fil-1")
+
+
+async def test_un_graphique_atteint_le_navigateur_avant_son_commentaire(
+    monkeypatch, send_email_tool
+):
+    """Le seul résultat d'outil qui traverse : il est fait pour être vu."""
+    orchestrateur = _orchestrateur(
+        monkeypatch,
+        send_email_tool,
+        calling(GRAPHIQUE),
+        AIMessage(content="La Nuit des étoiles a attiré le plus de monde."),
+    )
+
+    events = await _evenements(_demande(orchestrateur, "montre la présence"))
+
+    assert DESSIN in events
+    commentaire = next(e for e in events if isinstance(e, MessageEvent))
+    assert events.index(DESSIN) < events.index(commentaire)
+
+
+async def test_un_graphique_reste_visible_dans_un_fil_rouvert(
+    monkeypatch, send_email_tool
+):
+    """Un fil relu doit ressembler au fil vécu : le graphique y est, à sa
+    place, dans la forme de l'évènement du flux."""
+    orchestrateur = _orchestrateur(
+        monkeypatch,
+        send_email_tool,
+        calling(GRAPHIQUE),
+        AIMessage(content="Voilà."),
+    )
+    await _evenements(_demande(orchestrateur, "montre la présence"))
+
+    etat = await orchestrateur.get_state("fil-1", ADMIN)
+
+    assert [m["role"] for m in etat.messages] == ["human", "chart", "ai"]
+    graphique = etat.messages[1]
+    assert graphique["spec"] == CHART_RESULT["chart"]
+    assert graphique["version"] == 1
 
 
 # -- un run à la fois, et le verrou toujours rendu ----------------------------
@@ -332,3 +378,38 @@ def test_un_message_sans_texte_d_assistant_est_invisible(message):
 
 def test_une_demande_est_toujours_visible():
     assert module._is_visible(HumanMessage(content="combien ?"))
+
+
+def _resultat(payload, **kwargs) -> ToolMessage:
+    return ToolMessage(
+        content=json.dumps(payload, ensure_ascii=False),
+        tool_call_id="g1",
+        name="generate_graph",
+        **kwargs,
+    )
+
+
+def test_un_graphique_est_reconnu_a_sa_forme():
+    """Les blocs de contenu d'Anthropic compris."""
+    blocs = [{"type": "text", "text": json.dumps(CHART_RESULT)}]
+    resultat = ToolMessage(content=blocs, tool_call_id="g1", name="generate_graph")
+
+    assert module._chart_of(_resultat(CHART_RESULT)) == DESSIN
+    assert module._chart_of(resultat) == DESSIN
+
+
+@pytest.mark.parametrize(
+    "resultat",
+    [
+        _resultat({"rows": [{"n": 12}]}),
+        _resultat(CHART_RESULT, status="error"),
+        _resultat({"kind": "chart", "chart": CHART_RESULT["chart"]}),
+        _resultat({"kind": "chart", "version": 1, "chart": "barres"}),
+    ],
+    ids=["autre-resultat", "en-erreur", "sans-version", "spec-illisible"],
+)
+def test_seul_un_graphique_complet_est_dessine(resultat):
+    """Une forme incomplète est écartée plutôt que de faire dessiner un
+    graphique vide."""
+    assert module._chart_of(resultat) is None
+    assert not module._is_visible(resultat)

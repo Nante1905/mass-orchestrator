@@ -51,6 +51,23 @@ EMAIL_SENT: dict[str, Any] = {
 }
 
 
+# Reprise de `generateGraph.ts` : un graphique en barres.
+CHART_RESULT: dict[str, Any] = {
+    "kind": "chart",
+    "version": 1,
+    "chart": {
+        "type": "bar",
+        "title": "Présence par évènement",
+        "xLabel": None,
+        "yLabel": "Présents",
+        "unit": "inscrits",
+        "stacked": False,
+        "labels": ["Nuit des étoiles", "Atelier optique"],
+        "series": [{"name": "Présents", "data": [42, 17]}],
+    },
+}
+
+
 def _as_mcp_text(payload: dict[str, Any]) -> str:
     """Comme `jsonResult` côté `mass-mcp` : du JSON en UTF-8, accents compris."""
     return json.dumps(payload, ensure_ascii=False)

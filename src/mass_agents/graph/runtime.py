@@ -17,7 +17,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.pregel import Pregel
 from langgraph.types import Command
@@ -33,6 +33,7 @@ from mass_agents.domain import (
 from mass_agents.graph.context import RunContext, build_run_config, build_thread_config
 from mass_agents.graph.events import (
     ApprovalEvent,
+    ChartEvent,
     DoneEvent,
     ErrorEvent,
     GraphEvent,
@@ -44,7 +45,7 @@ from mass_agents.graph.events import (
 )
 from mass_agents.graph.limits import steps_exhausted_message
 from mass_agents.persistence import ApprovalLog, RunLease, Thread, ThreadRepository
-from mass_agents.tools import build_mass_toolset
+from mass_agents.tools import build_mass_toolset, parse_tool_payload
 
 logger = logging.getLogger(__name__)
 
@@ -339,9 +340,13 @@ def _update_events(chunk: Any) -> list[GraphEvent]:
         if not isinstance(update, dict):
             continue
 
-        # Seuls les messages de l'assistant ont un sens pour l'interface : les
-        # résultats d'outils sont de la matière pour le modèle, pas une réponse.
+        # Les messages de l'assistant, et parmi les résultats d'outils les seuls
+        # graphiques : le reste est de la matière pour le modèle, pas une
+        # réponse — du JSON brut, adresses comprises.
         for message in update.get("messages", []):
+            if (chart := _chart_of(message)) is not None:
+                events.append(chart)
+                continue
             if not isinstance(message, AIMessage):
                 continue
             if text := _text_of(message.content):
@@ -351,13 +356,37 @@ def _update_events(chunk: Any) -> list[GraphEvent]:
     return events
 
 
-def _is_visible(message: AnyMessage) -> bool:
-    """Ce qu'une conversation rouverte montre : les demandes et les réponses.
+def _chart_of(message: Any) -> ChartEvent | None:
+    """Le graphique porté par un résultat d'outil, s'il en porte un.
 
-    Pas les résultats d'outils ni les appels sans texte — la même règle que le
-    flux, pour qu'un fil relu ressemble au fil vécu.
+    Reconnu à sa forme — `kind: "chart"` —, pas au nom de l'outil : c'est le
+    serveur qui décide de ce qui se dessine. Un résultat en erreur n'en porte
+    jamais, et une forme incomplète est écartée plutôt que de faire dessiner un
+    graphique vide.
     """
-    if isinstance(message, HumanMessage):
+    if not isinstance(message, ToolMessage) or message.status == "error":
+        return None
+
+    payload = parse_tool_payload(message.content)
+    if payload is None or payload.get("kind") != "chart":
+        return None
+
+    spec, version = payload.get("chart"), payload.get("version")
+    if not isinstance(spec, dict) or not isinstance(version, int):
+        logger.warning("Graphique mal formé écarté : outil %s", message.name)
+        return None
+
+    return ChartEvent(spec=spec, version=version)
+
+
+def _is_visible(message: AnyMessage) -> bool:
+    """Ce qu'une conversation rouverte montre : les demandes, les réponses et
+    les graphiques.
+
+    Pas les autres résultats d'outils ni les appels sans texte — la même règle
+    que le flux, pour qu'un fil relu ressemble au fil vécu.
+    """
+    if isinstance(message, HumanMessage) or _chart_of(message) is not None:
         return True
     return isinstance(message, AIMessage) and bool(_text_of(message.content))
 
@@ -388,7 +417,19 @@ def _serialize(message: AnyMessage) -> dict[str, Any]:
     On expose le type et le texte, pas l'objet LangChain : le back-office n'a
     pas à connaître `AIMessage`, et le jour où l'on changera de bibliothèque le
     contrat du front ne bougera pas.
+
+    Un graphique a son propre rôle, et les champs de l'évènement `chart` du
+    flux : l'interface le dessine de la même façon, en direct ou relu.
     """
+    if (chart := _chart_of(message)) is not None:
+        return {
+            "id": message.id,
+            "role": "chart",
+            "content": "",
+            "spec": chart.spec,
+            "version": chart.version,
+        }
+
     return {
         "id": message.id,
         "role": message.type,

@@ -77,6 +77,23 @@ class ToolsetError(MassAgentsError):
     """
 
 
+class SuggestionRequestError(MassAgentsError):
+    """La demande de suggestions est valide, mais rien ne permet d'y répondre.
+
+    Typiquement : seulement des évènements MASS, et aucun n'est à venir. Le
+    message dit quoi changer dans le formulaire.
+    """
+
+
+class SuggestionGenerationError(MassAgentsError):
+    """Le modèle n'a pas rendu de suggestions utilisables, même en réessayant.
+
+    Le nombre de posts ne correspond pas, une catégorie n'a pas été demandée,
+    ou un post cite une source qui n'existe pas. Rendu en 502 : la demande était
+    bonne, c'est la dépendance qui a mal répondu.
+    """
+
+
 class RunLimitError(MassAgentsError):
     """Un plafond a été atteint : tours, jetons, ou durée.
 

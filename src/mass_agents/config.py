@@ -18,11 +18,25 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import quote
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-#: Le niveau d'effort demandé au modèle (`output_config.effort`).
+#: Le niveau d'effort demandé au modèle (`output_config.effort` chez Anthropic,
+#: `reasoning_effort` chez OpenAI).
 Effort = Literal["low", "medium", "high"]
+
+#: Le fournisseur du modèle.
+Provider = Literal["anthropic", "openai"]
+
+#: Le fournisseur utilisé quand `LLM_PROVIDER` n'est pas posé dans `.env`.
+#: C'est ici qu'on bascule d'un fournisseur à l'autre dans le code.
+DEFAULT_PROVIDER: Provider = "anthropic"
+
+#: Le modèle utilisé quand `MODEL` est laissé vide, par fournisseur.
+DEFAULT_MODELS: dict[Provider, str] = {
+    "anthropic": "claude-opus-5",
+    "openai": "gpt-5-nano",
+}
 
 
 class _Env(BaseSettings):
@@ -48,14 +62,43 @@ class _Env(BaseSettings):
     DB_NAME: str = Field(min_length=1)
     CHECKPOINT_SCHEMA: str = Field(default="agents", pattern=r"^[a-z_][a-z0-9_]*$")
 
-    ANTHROPIC_API_KEY: str = Field(min_length=1)
-    MODEL: str = "claude-opus-5"
+    LLM_PROVIDER: Provider = DEFAULT_PROVIDER
+    ANTHROPIC_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
+    MODEL: str = ""
     MODEL_MAX_TOKENS: int = Field(default=8_192, ge=1)
     AGENT_EFFORT: Effort = "medium"
 
     MAX_STEPS: int = Field(default=15, ge=1)
     MAX_TOKENS_PER_REQUEST: int = Field(default=400_000, ge=1)
     RUN_TIMEOUT_S: float = Field(default=300.0, gt=0)
+
+    @model_validator(mode="after")
+    def _check_llm(self) -> _Env:
+        """Seule la clé du fournisseur choisi est exigée.
+
+        Un modèle d'un fournisseur envoyé à l'autre est refusé ici : un
+        `MODEL=claude-…` resté dans `.env` après une bascule vers OpenAI se
+        lirait sinon comme une erreur 404 au premier message.
+        """
+        key = (
+            self.OPENAI_API_KEY
+            if self.LLM_PROVIDER == "openai"
+            else self.ANTHROPIC_API_KEY
+        )
+        if not key:
+            raise ValueError(
+                f"{self.LLM_PROVIDER.upper()}_API_KEY est requis "
+                f"quand LLM_PROVIDER={self.LLM_PROVIDER}"
+            )
+        if self.MODEL and self.MODEL.startswith("claude") != (
+            self.LLM_PROVIDER == "anthropic"
+        ):
+            raise ValueError(
+                f"MODEL={self.MODEL} ne correspond pas à "
+                f"LLM_PROVIDER={self.LLM_PROVIDER}"
+            )
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +161,7 @@ class DatabaseConfig:
 
 @dataclass(frozen=True, slots=True)
 class LlmConfig:
+    provider: Provider
     api_key: str
     model: str
     max_tokens: int
@@ -174,8 +218,13 @@ def _build(env: _Env) -> AppConfig:
             checkpoint_schema=env.CHECKPOINT_SCHEMA,
         ),
         llm=LlmConfig(
-            api_key=env.ANTHROPIC_API_KEY,
-            model=env.MODEL,
+            provider=env.LLM_PROVIDER,
+            api_key=(
+                env.OPENAI_API_KEY
+                if env.LLM_PROVIDER == "openai"
+                else env.ANTHROPIC_API_KEY
+            ),
+            model=env.MODEL or DEFAULT_MODELS[env.LLM_PROVIDER],
             max_tokens=env.MODEL_MAX_TOKENS,
             effort=env.AGENT_EFFORT,
         ),

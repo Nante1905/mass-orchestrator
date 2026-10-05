@@ -23,7 +23,13 @@ from mass_agents.tools import (
     REQUIRED_TOOLS,
     MassToolset,
 )
-from mass_agents.tools.toolset import _assert_complete
+from mass_agents.tools.toolset import _assert_complete, _portable
+
+#: Le motif que `z.email()` produit dans `mass-mcp` : deux lookaheads.
+_ZOD_EMAIL = (
+    r"^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]"
+    r"@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$"
+)
 
 #: Les schémas de `mass-mcp` pour les deux écritures engageantes, tels que
 #: l'adaptateur MCP les rend : un JSON Schema en dictionnaire.
@@ -31,7 +37,7 @@ _SCHEMAS = {
     "send_email": {
         "type": "object",
         "properties": {
-            "to": {"type": "string", "format": "email"},
+            "to": {"type": "string", "format": "email", "pattern": _ZOD_EMAIL},
             "group_id": {"type": "string"},
             "subject": {"type": "string"},
             "body": {"type": "string"},
@@ -149,6 +155,35 @@ def test_les_autres_parametres_sont_conserves():
         "body",
     }
     assert courriel["input_schema"]["required"] == ["subject", "body"]
+
+
+def test_le_motif_a_lookahead_de_l_adresse_est_retire():
+    """OpenAI refuse toute la requête pour un lookaround dans un schéma
+    (`invalid_json_schema`) ; `format: email` suffit à guider le modèle."""
+    courriel = _engageants(_outillage().agent_schemas())["send_email"]
+
+    assert courriel["input_schema"]["properties"]["to"] == {
+        "type": "string",
+        "format": "email",
+    }
+
+
+def test_un_motif_sans_assertion_est_conserve():
+    schema = {"type": "object", "properties": {"code": {"pattern": "^[A-Z]{3}$"}}}
+
+    assert _portable(schema) == schema
+
+
+def test_les_motifs_imbriques_sont_retires():
+    schema = {
+        "type": "array",
+        "items": {"anyOf": [{"type": "string", "pattern": "^(?<!x)a$"}]},
+    }
+
+    assert _portable(schema) == {
+        "type": "array",
+        "items": {"anyOf": [{"type": "string"}]},
+    }
 
 
 def test_la_description_de_mass_mcp_est_remplacee():

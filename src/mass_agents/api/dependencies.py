@@ -18,6 +18,7 @@ from typing import Annotated
 from fastapi import Depends, Header, Request
 
 from mass_agents.auth import AdminAuthenticator, AdminIdentity, read_bearer_token
+from mass_agents.community import CommunityService
 from mass_agents.domain import AdminAuthError
 from mass_agents.graph import Orchestrator
 
@@ -38,6 +39,10 @@ def get_authenticator(request: Request) -> AdminAuthenticator:
     return request.app.state.authenticator
 
 
+def get_community(request: Request) -> CommunityService:
+    return request.app.state.community
+
+
 async def current_caller(
     authenticator: Annotated[AdminAuthenticator, Depends(get_authenticator)],
     authorization: Annotated[str | None, Header()] = None,
@@ -55,3 +60,4 @@ async def current_caller(
 
 CurrentCaller = Annotated[Caller, Depends(current_caller)]
 OrchestratorDep = Annotated[Orchestrator, Depends(get_orchestrator)]
+CommunityDep = Annotated[CommunityService, Depends(get_community)]

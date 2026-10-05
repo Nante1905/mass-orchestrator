@@ -44,7 +44,7 @@ async def agent_node(state: OrchestratorState, config: RunnableConfig) -> dict:
         return {"messages": [AIMessage(content=budget_exhausted_message())]}
 
     toolset = run_context(config).toolset
-    model = build_model().bind_tools(toolset.agent_schemas())
+    model = build_model().bind_tools(toolset.agent_schemas(), strict=False)
 
     response = await model.ainvoke(
         [SystemMessage(content=AGENT_PROMPT), *messages], config

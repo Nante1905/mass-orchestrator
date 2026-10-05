@@ -16,6 +16,7 @@ séparation.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -125,7 +126,7 @@ def _engaging_schema(tool: BaseTool) -> dict[str, Any]:
     Seuls le nom et le schéma viennent de `mass-mcp` ; le schéma perd
     `confirmed`. La description est la nôtre (voir `ENGAGING_DESCRIPTIONS`).
     """
-    parameters = convert_to_openai_tool(tool)["function"]["parameters"]
+    parameters = _portable(convert_to_openai_tool(tool)["function"]["parameters"])
 
     return {
         "name": tool.name,
@@ -145,6 +146,34 @@ def _engaging_schema(tool: BaseTool) -> dict[str, Any]:
             "additionalProperties": False,
         },
     }
+
+
+#: Les assertions de regex (`(?=`, `(?!`, `(?<=`, `(?<!`), que l'API OpenAI
+#: refuse dans un schéma d'outil (`invalid_json_schema`).
+_LOOKAROUND = re.compile(r"\(\?<?[=!]")
+
+
+def _portable(schema: Any) -> Any:
+    """Le schéma sans les `pattern` à assertions, que tous les fournisseurs lisent.
+
+    `z.email()` produit dans `mass-mcp` un motif à lookahead : Anthropic le
+    tolère, OpenAI rejette toute la requête. Le retirer ne relâche rien —
+    `format: email` reste sous les yeux du modèle, et `mass-mcp` revalide
+    l'adresse à l'aperçu comme à l'envoi.
+    """
+    if isinstance(schema, dict):
+        return {
+            key: _portable(value)
+            for key, value in schema.items()
+            if not (
+                key == "pattern"
+                and isinstance(value, str)
+                and _LOOKAROUND.search(value)
+            )
+        }
+    if isinstance(schema, list):
+        return [_portable(item) for item in schema]
+    return schema
 
 
 def _assert_complete(toolset: MassToolset, exposed: set[str]) -> None:

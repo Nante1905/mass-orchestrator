@@ -23,6 +23,7 @@ from mass_agents.api.responses import ApiResponse
 from mass_agents.domain import (
     AdminAuthError,
     MassAgentsError,
+    SuggestionGenerationError,
     ThreadConflictError,
     ThreadNotFoundError,
     ToolsetError,
@@ -69,6 +70,13 @@ def register_error_handlers(app: FastAPI) -> None:
         # sens.
         logger.error("Outillage indisponible : %s", error)
         return _failure(503, str(error))
+
+    @app.exception_handler(SuggestionGenerationError)
+    async def _generation(_: Request, error: SuggestionGenerationError):
+        # 502 : la demande était bonne, c'est le modèle qui a mal répondu.
+        # Réessayer a du sens, ce que dit aussi le message.
+        logger.warning("Suggestions non générées : %s", error)
+        return _failure(502, str(error))
 
     @app.exception_handler(MassAgentsError)
     async def _domain(_: Request, error: MassAgentsError):

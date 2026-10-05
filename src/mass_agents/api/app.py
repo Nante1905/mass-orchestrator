@@ -27,8 +27,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from mass_agents.api.errors import register_error_handlers
-from mass_agents.api.routes import health_router, threads_router
+from mass_agents.api.routes import community_router, health_router, threads_router
 from mass_agents.auth import AdminAuthenticator
+from mass_agents.community import CommunityService, FeedReader
 from mass_agents.config import AppConfig, get_config
 from mass_agents.graph import Orchestrator, build_graph
 from mass_agents.persistence import (
@@ -70,6 +71,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             mcp=app_config.mcp,
             limits=app_config.limits,
         )
+        # Hors du graphe : la page de suggestions ne converse pas, et ne
+        # touche ni aux fils ni aux checkpoints. Le lecteur de flux vit ici
+        # pour que son cache dure autant que le processus.
+        app.state.community = CommunityService(
+            FeedReader(),
+            app_config.mcp,
+            timeout_s=app_config.limits.run_timeout_s,
+        )
 
         logger.info(
             "mass-agents prêt — MCP %s, checkpoints dans le schéma %s",
@@ -102,5 +111,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     register_error_handlers(app)
     app.include_router(health_router)
     app.include_router(threads_router)
+    app.include_router(community_router)
 
     return app

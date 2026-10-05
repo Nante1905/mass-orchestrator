@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from mass_agents.api.responses import ApiResponse
 from mass_agents.domain import (
     AdminAuthError,
+    EmailDraftGenerationError,
     MassAgentsError,
     SuggestionGenerationError,
     ThreadConflictError,
@@ -76,6 +77,12 @@ def register_error_handlers(app: FastAPI) -> None:
         # 502 : la demande était bonne, c'est le modèle qui a mal répondu.
         # Réessayer a du sens, ce que dit aussi le message.
         logger.warning("Suggestions non générées : %s", error)
+        return _failure(502, str(error))
+
+    @app.exception_handler(EmailDraftGenerationError)
+    async def _draft(_: Request, error: EmailDraftGenerationError):
+        # 502 pour la même raison que les posts : réessayer a du sens.
+        logger.warning("Courriel non rédigé : %s", error)
         return _failure(502, str(error))
 
     @app.exception_handler(MassAgentsError)

@@ -27,11 +27,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from mass_agents.api.errors import register_error_handlers
-from mass_agents.api.routes import community_router, health_router, threads_router
+from mass_agents.api.routes import (
+    community_router,
+    emails_router,
+    health_router,
+    threads_router,
+)
 from mass_agents.auth import AdminAuthenticator
 from mass_agents.community import CommunityService, FeedReader
 from mass_agents.config import AppConfig, get_config
 from mass_agents.graph import Orchestrator, build_graph
+from mass_agents.mailing import EmailDraftService
 from mass_agents.persistence import (
     ApprovalLog,
     Database,
@@ -79,6 +85,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             app_config.mcp,
             timeout_s=app_config.limits.run_timeout_s,
         )
+        # Même parti que les suggestions : un appel au modèle, hors du graphe.
+        app.state.mailing = EmailDraftService(
+            app_config.mcp,
+            timeout_s=app_config.limits.run_timeout_s,
+        )
 
         logger.info(
             "mass-agents prêt — MCP %s, checkpoints dans le schéma %s",
@@ -112,5 +123,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(threads_router)
     app.include_router(community_router)
+    app.include_router(emails_router)
 
     return app

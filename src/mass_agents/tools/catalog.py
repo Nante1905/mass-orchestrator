@@ -22,6 +22,7 @@ from mass_agents.domain import ENGAGING_TOOLS
 READ_TOOLS: Final[tuple[str, ...]] = (
     "list_events",
     "get_event_details",
+    "get_event_feedbacks",
     "list_members",
     "get_member_details",
     "get_attendance_stats",

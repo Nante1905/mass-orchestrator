@@ -103,6 +103,26 @@ class EmailDraftGenerationError(MassAgentsError):
     """
 
 
+class FeedbackAnalysisRequestError(MassAgentsError):
+    """L'analyse est demandée sur un évènement qui ne s'y prête pas.
+
+    Évènement inconnu (404), ou aucun avis encore déposé (409). `status` porte
+    le code à rendre : le message dit quoi faire, et ce n'est pas réessayer.
+    """
+
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class FeedbackAnalysisGenerationError(MassAgentsError):
+    """Le modèle n'a pas rendu d'analyse utilisable, même en réessayant.
+
+    Un avis oublié ou classé deux fois, un thème qui cite un avis inexistant.
+    Rendu en 502, comme pour les posts et les courriels.
+    """
+
+
 class RunLimitError(MassAgentsError):
     """Un plafond a été atteint : tours, jetons, ou durée.
 

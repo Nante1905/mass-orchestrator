@@ -23,6 +23,8 @@ from mass_agents.api.responses import ApiResponse
 from mass_agents.domain import (
     AdminAuthError,
     EmailDraftGenerationError,
+    FeedbackAnalysisGenerationError,
+    FeedbackAnalysisRequestError,
     MassAgentsError,
     SuggestionGenerationError,
     ThreadConflictError,
@@ -83,6 +85,17 @@ def register_error_handlers(app: FastAPI) -> None:
     async def _draft(_: Request, error: EmailDraftGenerationError):
         # 502 pour la même raison que les posts : réessayer a du sens.
         logger.warning("Courriel non rédigé : %s", error)
+        return _failure(502, str(error))
+
+    @app.exception_handler(FeedbackAnalysisRequestError)
+    async def _analysis_request(_: Request, error: FeedbackAnalysisRequestError):
+        # Évènement inconnu, ou pas encore d'avis : le code vient de la cause.
+        return _failure(error.status, str(error))
+
+    @app.exception_handler(FeedbackAnalysisGenerationError)
+    async def _analysis(_: Request, error: FeedbackAnalysisGenerationError):
+        # 502 pour la même raison que les posts : réessayer a du sens.
+        logger.warning("Avis non analysés : %s", error)
         return _failure(502, str(error))
 
     @app.exception_handler(MassAgentsError)

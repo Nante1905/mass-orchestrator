@@ -20,6 +20,7 @@ from fastapi import Depends, Header, Request
 from mass_agents.auth import AdminAuthenticator, AdminIdentity, read_bearer_token
 from mass_agents.community import CommunityService
 from mass_agents.domain import AdminAuthError
+from mass_agents.feedbacks import FeedbackAnalysisService
 from mass_agents.graph import Orchestrator
 from mass_agents.mailing import EmailDraftService
 
@@ -48,6 +49,10 @@ def get_mailing(request: Request) -> EmailDraftService:
     return request.app.state.mailing
 
 
+def get_feedbacks(request: Request) -> FeedbackAnalysisService:
+    return request.app.state.feedbacks
+
+
 async def current_caller(
     authenticator: Annotated[AdminAuthenticator, Depends(get_authenticator)],
     authorization: Annotated[str | None, Header()] = None,
@@ -67,3 +72,4 @@ CurrentCaller = Annotated[Caller, Depends(current_caller)]
 OrchestratorDep = Annotated[Orchestrator, Depends(get_orchestrator)]
 CommunityDep = Annotated[CommunityService, Depends(get_community)]
 MailingDep = Annotated[EmailDraftService, Depends(get_mailing)]
+FeedbacksDep = Annotated[FeedbackAnalysisService, Depends(get_feedbacks)]
